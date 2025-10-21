@@ -20,7 +20,8 @@ var rootCmd = &cobra.Command{
 	Long: `Devbox 压测工具提供了多种压测场景：
 
 - scale: scale test, create a lot of devbox
-- concurrent: concurrent test, test concurrent creation ability  
+- concurrent: concurrent test, test concurrent creation ability
+- release: DevBoxRelease test, test release functionality
 - monitor: resource monitoring, continuously monitor cluster status
 - cleanup: cleanup test resources
 - smallfile: smallfile test, test smallfile write ability
@@ -28,6 +29,7 @@ var rootCmd = &cobra.Command{
 examples:
   devbox-stress scale --count 100
   devbox-stress concurrent --count 50 --concurrent 10
+  devbox-stress release --count 10 --concurrent 5
   devbox-stress monitor --duration 30m
   devbox-stress cleanup -n namespace
   devbox-stress smallfile --count 100 --concurrent 10`,
