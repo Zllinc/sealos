@@ -391,7 +391,7 @@ func (t *DevboxStressTester) ListTestResources(ctx context.Context, allNamespace
 	// filter test resources (through label selector)
 	for _, devbox := range devboxList.Items {
 		if devbox.Labels != nil {
-			if testType, exists := devbox.Labels["test-type"]; exists && testType == "devbox-stress" {
+			if _, exists := devbox.Labels["test-type"]; exists {
 				resources = append(resources, DevboxResource{
 					Name:      devbox.Name,
 					Namespace: devbox.Namespace,
@@ -585,12 +585,12 @@ func (t *DevboxStressTester) writeTestDataToContainer(ctx context.Context, devbo
 	cmd := []string{
 		"bash", "-c",
 		fmt.Sprintf(`
-mkdir -p /home/devbox/test_commit_data
-cd /home/devbox/test_commit_data
+mkdir -p /home/devbox/project/test_commit_data
+cd /home/devbox/project/test_commit_data
 echo "start writing test data..."
 
 # Calculate available space (leave some buffer)
-available_space=$(df /home/devbox/test_commit_data | tail -1 | awk '{print $4}')
+available_space=$(df /home/devbox/project/test_commit_data | tail -1 | awk '{print $4}')
 echo "available space: $available_space KB"
 
 # Try to write files until we hit storage limit
@@ -989,8 +989,8 @@ func (t *DevboxStressTester) verifyContainerData(ctx context.Context, devbox dev
 		"bash", "-c",
 		`
 echo "check test data..."
-if [ -d "/home/devbox/test_commit_data" ]; then
-    cd /home/devbox/test_commit_data
+if [ -d "/home/devbox/project/test_commit_data" ]; then
+    cd /home/devbox/project/test_commit_data
     file_count=$(ls -1 file_*.bin 2>/dev/null | wc -l)
     total_size=$(du -sh . 2>/dev/null | cut -f1)
     echo "found $file_count test files, total size: $total_size"
@@ -2093,8 +2093,8 @@ func (t *DevboxStressTester) writeSmallFilesToContainer(ctx context.Context, dev
 	cmd := []string{
 		"bash", "-c",
 		fmt.Sprintf(`
-mkdir -p /home/devbox/smallfile_test
-cd /home/devbox/smallfile_test
+mkdir -p /home/devbox/project/smallfile_test
+cd /home/devbox/project/smallfile_test
 echo "开始写入 %d 个小文件..." 
 
 # 写入小文件

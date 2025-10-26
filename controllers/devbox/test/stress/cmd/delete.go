@@ -3,70 +3,157 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/labring/sealos/controllers/devbox/test/stress/pkg/tester"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
-var deleteTestCmd = &cobra.Command{
+var deleteCmd = &cobra.Command{
 	Use:   "delete",
-	Short: "删除测试 - 验证 devbox 删除后所有资源都被清理",
-	Long: `删除测试会删除现有的测试 devbox，并验证所有相关资源都被正确清理。
+	Short: "test devbox deletion and resource cleanup",
+	Long: `test devbox deletion and resource cleanup.
 
-这个测试会检查：
-1. Devbox 资源是否被删除
-2. Pod 是否被删除
-3. LVM 逻辑卷是否被删除
-4. 其他相关资源是否被清理
+this command will execute the following test flow:
+1. scan all devboxes in the specified namespace
+2. delete devboxes concurrently
+3. monitor and verify resource cleanup (devbox, pod, service, secret, lvm)
+4. output detailed deletion report
 
-注意：此测试需要在并发创建测试之后执行，用于验证删除操作。
+example:
+  # delete all devboxes in the specified namespace (sequential deletion)
+  devbox-stress delete --namespace devbox-test
 
-示例:
-  devbox-stress delete --count 5
-  devbox-stress delete --count 3 --namespace test-namespace`,
-	RunE: runDeleteTest,
+  # concurrent deletion (concurrent count is 5)
+  devbox-stress delete --namespace devbox-test --concurrent 5
+
+  # custom timeout and check interval
+  devbox-stress delete --namespace devbox-test --concurrent 3 --timeout 5m --check-interval 2s
+
+  # view detailed results
+  devbox-stress delete --namespace devbox-test --verbose
+
+note:
+- deletion operation is irreversible, please use with caution
+- it is recommended to use in test environment
+- you can first use 'kubectl get devbox -n <namespace>' to confirm the devboxes to be deleted
+`,
+	Run: runDeleteTest,
 }
 
 var (
-	deleteTestCount   int
-	deleteTestTimeout time.Duration
-	deleteTestVerify  bool
+	deleteNamespace  string
+	deleteConcurrent int
+	deleteTimeout    time.Duration
+	checkInterval    time.Duration
+	testTimeout      time.Duration
+	verboseOutput    bool
 )
 
 func init() {
-	rootCmd.AddCommand(deleteTestCmd)
+	rootCmd.AddCommand(deleteCmd)
 
-	// Delete test specific flags
-	deleteTestCmd.Flags().IntVar(&deleteTestCount, "count", 3, "要创建和删除的 devbox 数量")
-	deleteTestCmd.Flags().DurationVar(&deleteTestTimeout, "timeout", 5*time.Minute, "删除测试的超时时间")
-	deleteTestCmd.Flags().BoolVar(&deleteTestVerify, "verify", true, "是否验证资源删除")
+	deleteCmd.Flags().StringVarP(&deleteNamespace, "namespace", "n", "devbox-test", "namespace of devboxes")
+	deleteCmd.Flags().IntVarP(&deleteConcurrent, "concurrent", "c", 1, "concurrent deletion count (1 means sequential deletion)")
+	deleteCmd.Flags().DurationVar(&deleteTimeout, "timeout", 10*time.Minute, "timeout for single devbox deletion")
+	deleteCmd.Flags().DurationVar(&checkInterval, "check-interval", 2*time.Second, "resource check interval")
+	deleteCmd.Flags().DurationVar(&testTimeout, "test-timeout", 30*time.Minute, "total test timeout")
+	deleteCmd.Flags().BoolVarP(&verboseOutput, "verbose", "v", true, "display detailed output")
 }
 
-func runDeleteTest(cmd *cobra.Command, args []string) error {
-	config := &tester.StressTestConfig{
-		DevboxCount:     deleteTestCount,
-		ConcurrentCount: 1, // make sure to delete one by one
-		TestTimeout:     deleteTestTimeout,
-		Image:           viper.GetString("image"),
-		CPU:             viper.GetString("cpu"),
-		Memory:          viper.GetString("memory"),
-		StorageLimit:    viper.GetString("storage"),
-		Namespace:       viper.GetString("namespace"),
+func runDeleteTest(cmd *cobra.Command, args []string) {
+	ctx := context.Background()
+
+	// create configuration
+	config := &tester.DeleteTestConfig{
+		Namespace:       deleteNamespace,
+		ConcurrentCount: deleteConcurrent,
+		CheckInterval:   checkInterval,
+		DeleteTimeout:   deleteTimeout,
+		TestTimeout:     testTimeout,
 	}
 
-	fmt.Printf("开始删除测试...\n")
-	fmt.Printf("配置: 最大删除数量=%d, 超时=%v, 验证=%t\n", deleteTestCount, deleteTestTimeout, deleteTestVerify)
-	fmt.Printf("命名空间: %s\n\n", config.Namespace)
-
-	stressTester, err := tester.NewDevboxStressTester(config)
+	// create delete tester
+	deleteTester, err := tester.NewDevboxDeleteTester(config)
 	if err != nil {
-		return fmt.Errorf("创建压测工具失败: %w", err)
+		log.Fatalf("failed to create delete tester: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), deleteTestTimeout)
-	defer cancel()
+	// run delete test
+	log.Printf("start delete test...")
+	log.Printf("configuration:")
+	log.Printf("  namespace: %s", config.Namespace)
+	log.Printf("  concurrent count: %d", config.ConcurrentCount)
+	log.Printf("  delete timeout: %v", config.DeleteTimeout)
+	log.Printf("  check interval: %v", config.CheckInterval)
+	log.Printf("  total test timeout: %v", config.TestTimeout)
+	log.Printf("")
 
-	return stressTester.RunDeleteTest(ctx, deleteTestCount, deleteTestVerify)
+	result, err := deleteTester.RunDeleteTest(ctx)
+	if err != nil {
+		log.Fatalf("delete test failed: %v", err)
+	}
+
+	// print results
+	printDeleteResults(result, deleteTester, verboseOutput)
+}
+
+func printDeleteResults(result *tester.DeleteTestResult, deleteTester *tester.DevboxDeleteTester, verbose bool) {
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("delete test result summary")
+	fmt.Println(strings.Repeat("=", 60))
+
+	fmt.Printf("total delete count: %d\n", result.TotalDevboxes)
+	fmt.Printf("successful delete: %d (%.1f%%)\n", result.SuccessfulDeletes,
+		float64(result.SuccessfulDeletes)/float64(result.TotalDevboxes)*100)
+	fmt.Printf("failed delete: %d (%.1f%%)\n", result.FailedDeletes,
+		float64(result.FailedDeletes)/float64(result.TotalDevboxes)*100)
+
+	fmt.Printf("\nTime statistics:\n")
+	fmt.Printf("  average delete time: %v\n", result.AverageDeleteTime)
+	fmt.Printf("  total test time: %v\n", result.TotalTestTime)
+	fmt.Printf("  delete QPS: %.2f/s\n", result.MaxQPS)
+
+	fmt.Printf("\nresource cleanup statistics:\n")
+	printResourceStat("Devbox", result.ResourceCheckStats.DevboxCleaned, result.TotalDevboxes)
+	printResourceStat("Pod", result.ResourceCheckStats.PodCleaned, result.TotalDevboxes)
+	printResourceStat("Service", result.ResourceCheckStats.ServiceCleaned, result.TotalDevboxes)
+	printResourceStat("Secret", result.ResourceCheckStats.SecretCleaned, result.TotalDevboxes)
+	printResourceStat("LVM", result.ResourceCheckStats.LVMCleaned, result.TotalDevboxes)
+
+	if len(result.ErrorMessages) > 0 {
+		fmt.Printf("\nerror messages (%d):\n", len(result.ErrorMessages))
+		for i, msg := range result.ErrorMessages {
+			fmt.Printf("  [%d] %s\n", i+1, msg)
+		}
+	}
+
+	// detailed output
+	if verbose {
+		deleteTester.PrintDetailedResults(result)
+	}
+
+	fmt.Println("\n" + strings.Repeat("=", 60))
+
+	// success/failure status
+	if result.FailedDeletes == 0 {
+		fmt.Println("✓ All devboxes deleted successfully, resource cleanup completed!")
+	} else {
+		fmt.Printf("⚠ Some devboxes deleted failed or resource not fully cleaned (%d/%d)\n",
+			result.FailedDeletes, result.TotalDevboxes)
+	}
+}
+
+func printResourceStat(resourceType string, cleaned, total int) {
+	percentage := 0.0
+	if total > 0 {
+		percentage = float64(cleaned) / float64(total) * 100
+	}
+	status := "✓"
+	if cleaned < total {
+		status = "⚠"
+	}
+	fmt.Printf("  %s %-10s: %3d/%3d (%.1f%%)\n", status, resourceType, cleaned, total, percentage)
 }

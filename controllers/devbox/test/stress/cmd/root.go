@@ -17,11 +17,15 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "devbox-stress",
 	Short: "Devbox stress test tool",
-	Long: `Devbox 压测工具提供了多种压测场景：
+	Long: `Devbox stress test tool provides multiple stress test scenarios:
 
 - scale: scale test, create a lot of devbox
 - concurrent: concurrent test, test concurrent creation ability
 - release: DevBoxRelease test, test release functionality
+- lifecycle: full lifecycle test, from creation to release
+- commit: commit test, test commit functionality
+- delete: delete test, test devbox deletion and resource cleanup
+- edge: edge case test, test boundary conditions
 - monitor: resource monitoring, continuously monitor cluster status
 - cleanup: cleanup test resources
 - smallfile: smallfile test, test smallfile write ability
@@ -30,6 +34,10 @@ examples:
   devbox-stress scale --count 100
   devbox-stress concurrent --count 50 --concurrent 10
   devbox-stress release --count 10 --concurrent 5
+  devbox-stress lifecycle --count 5 --concurrent 3
+  devbox-stress commit stopped --count 5
+  devbox-stress delete --namespace devbox-test --concurrent 5
+  devbox-stress edge toggle --cycles 10 --count 5
   devbox-stress monitor --duration 30m
   devbox-stress cleanup -n namespace
   devbox-stress smallfile --count 100 --concurrent 10`,
@@ -61,7 +69,7 @@ func init() {
 	rootCmd.PersistentFlags().String("image", "ghcr.io/labring-actions/devbox/go-1.23.0:13aacd8", "devbox image")
 	rootCmd.PersistentFlags().String("cpu", "2000m", "CPU resource")
 	rootCmd.PersistentFlags().String("memory", "4096Mi", "memory resource")
-	rootCmd.PersistentFlags().String("storage", "1Gi", "storage limit")
+	rootCmd.PersistentFlags().String("storage", "10Gi", "storage limit")
 
 	// Bind flags to viper
 	viper.BindPFlag("kubeconfig", rootCmd.PersistentFlags().Lookup("kubeconfig"))

@@ -11,110 +11,119 @@ import (
 
 var cleanupCmd = &cobra.Command{
 	Use:   "cleanup",
-	Short: "清理测试资源",
-	Long: `清理命令会删除所有带有压测标签的 devbox 资源。
+	Short: "cleanup test resources",
+	Long: `cleanup command will delete all Devbox and DevBoxRelease resources with test labels.
 
-这个命令会查找所有带有 "stress-test=true" 标签的 devbox，
-并将它们全部删除。通常在测试完成后使用。
+this command will find all test resources (including Devbox and DevBoxRelease) and delete them. It is usually used after the test.
 
-示例:
-  devbox-stress cleanup
-  devbox-stress cleanup --namespace test-namespace
-  devbox-stress cleanup --all-namespaces`,
+supported test resources:
+  - Devbox (label: stress-test=true)
+  - DevBoxRelease (name contains release-test/lifecycle-test)
+
+example:
+  # cleanup test resources in a specific namespace
+  devbox-stress cleanup --namespace devbox-test
+
+  # cleanup all namespaces
+  devbox-stress cleanup --all-namespaces
+
+  # force delete (remove finalizer)
+  devbox-stress cleanup --force
+
+  # list resources, but not delete (DryRun)
+  devbox-stress cleanup --dry-run
+
+  # skip confirmation prompt
+  devbox-stress cleanup --yes`,
 	RunE: runCleanup,
 }
 
 var (
 	allNamespaces bool
-	force         bool
+	forceCleanup  bool
+	dryRun        bool
+	skipConfirm   bool
 )
 
 func init() {
 	rootCmd.AddCommand(cleanupCmd)
 
 	// Cleanup specific flags
-	cleanupCmd.Flags().BoolVar(&allNamespaces, "all-namespaces", false, "清理所有命名空间中的测试资源")
-	cleanupCmd.Flags().BoolVarP(&force, "force", "f", false, "强制删除，不询问确认")
-	cleanupCmd.Flags().BoolVar(&force, "force-delete", false, "强制删除，移除 finalizer 后删除")
+	cleanupCmd.Flags().BoolVar(&allNamespaces, "all-namespaces", false, "cleanup test resources in all namespaces")
+	cleanupCmd.Flags().BoolVarP(&forceCleanup, "force", "f", false, "force delete, remove finalizer after deletion")
+	cleanupCmd.Flags().BoolVar(&dryRun, "dry-run", false, "list resources, but not delete")
+	cleanupCmd.Flags().BoolVarP(&skipConfirm, "yes", "y", false, "skip confirmation prompt, directly delete")
 }
 
 func runCleanup(cmd *cobra.Command, args []string) error {
-	config := &tester.StressTestConfig{
-		DevboxCount:     0,
-		ConcurrentCount: 0,
-		CreateInterval:  0,
-		TestTimeout:     0,
-		CleanupAfter:    false,
-		Image:           viper.GetString("image"),
-		CPU:             viper.GetString("cpu"),
-		Memory:          viper.GetString("memory"),
-		StorageLimit:    viper.GetString("storage"),
-		Namespace:       viper.GetString("namespace"),
+	config := &tester.CleanupConfig{
+		Namespace:     viper.GetString("namespace"),
+		AllNamespaces: allNamespaces,
+		Force:         forceCleanup,
+		DryRun:        dryRun,
 	}
 
-	fmt.Printf("开始清理测试资源...\n")
+	fmt.Printf("start cleaning up test resources...\n")
 	if allNamespaces {
-		fmt.Printf("目标: 所有命名空间\n")
+		fmt.Printf("scope: all namespaces\n")
 	} else {
-		fmt.Printf("目标命名空间: %s\n", config.Namespace)
+		fmt.Printf("scope: %s\n", config.Namespace)
+	}
+	if dryRun {
+		fmt.Printf("mode: DryRun (list resources, but not delete)\n")
+	}
+	if forceCleanup {
+		fmt.Printf("force delete: yes (remove finalizer)\n")
 	}
 	fmt.Println()
 
-	stressTester, err := tester.NewDevboxStressTester(config)
+	cleanupTester, err := tester.NewDevboxCleanupTester(config)
 	if err != nil {
-		return fmt.Errorf("创建压测工具失败: %w", err)
+		return fmt.Errorf("failed to create cleanup tester: %w", err)
 	}
 
 	ctx := context.Background()
 
-	// List resources to be cleaned up
-	resources, err := stressTester.ListTestResources(ctx, allNamespaces)
+	// list resources to be cleaned up
+	resources, err := cleanupTester.ListTestResources(ctx)
 	if err != nil {
-		return fmt.Errorf("列出测试资源失败: %w", err)
+		return fmt.Errorf("failed to list test resources: %w", err)
 	}
 
-	if len(resources) == 0 {
-		fmt.Println("未找到需要清理的测试资源")
+	if resources.TotalResources == 0 {
+		fmt.Println("no test resources found to be cleaned up")
 		return nil
 	}
 
-	fmt.Printf("找到 %d 个测试资源:\n", len(resources))
-	for _, resource := range resources {
-		fmt.Printf("  - %s/%s\n", resource.Namespace, resource.Name)
-	}
-	fmt.Println()
+	// print cleanup plan
+	cleanupTester.PrintCleanupPlan(resources)
 
-	// Confirm deletion unless force flag is set
-	if !force {
-		fmt.Printf("确认删除这些资源? (y/N): ")
+	// if DryRun, return directly
+	if dryRun {
+		fmt.Println("\nℹ DryRun mode: no actual deletion performed")
+		return nil
+	}
+
+	// confirm deletion
+	if !skipConfirm {
+		fmt.Printf("\nconfirm deletion of these resources? (y/N): ")
 		var response string
 		fmt.Scanln(&response)
 		if response != "y" && response != "Y" && response != "yes" && response != "YES" {
-			fmt.Println("取消清理操作")
+			fmt.Println("cancel cleanup operation")
 			return nil
 		}
 	}
 
-	// Perform cleanup
-	fmt.Println("正在清理资源...")
-
-	var deletedCount int
-
-	// 检查是否使用强制删除
-	if force {
-		fmt.Println("使用强制删除模式...")
-		if err := stressTester.ForceCleanup(ctx); err != nil {
-			return fmt.Errorf("强制清理失败: %w", err)
-		}
-		deletedCount = len(resources) // 假设全部删除
-	} else {
-		var err error
-		deletedCount, err = stressTester.CleanupWithDetails(ctx, allNamespaces)
-		if err != nil {
-			return fmt.Errorf("清理失败: %w", err)
-		}
+	// execute cleanup
+	fmt.Println("\n正在清理资源...")
+	result, err := cleanupTester.RunCleanup(ctx)
+	if err != nil {
+		return fmt.Errorf("cleanup failed: %w", err)
 	}
 
-	fmt.Printf("清理完成，已删除 %d 个资源\n", deletedCount)
+	// print result
+	cleanupTester.PrintCleanupResult(result)
+
 	return nil
 }
