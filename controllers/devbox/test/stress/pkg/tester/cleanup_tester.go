@@ -329,6 +329,7 @@ func (t *DevboxCleanupTester) isTestDevbox(devbox devboxv1alpha2.Devbox) bool {
 		"release-test-devbox-",
 		"lifecycle-test-",
 		"edge-toggle-devbox-",
+		"test-devbox-",
 	}
 
 	for _, prefix := range testPrefixes {
@@ -347,6 +348,7 @@ func (t *DevboxCleanupTester) isTestRelease(release devboxv1alpha2.DevBoxRelease
 		"release-test",
 		"concurrent-release",
 		"lifecycle-test",
+		"test-devbox",
 	}
 
 	for _, keyword := range testKeywords {

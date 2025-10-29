@@ -411,39 +411,99 @@ fi
 
 // ExecCommandInPod executes a command in a Pod
 func (h *DevboxCommonHelper) ExecCommandInPod(ctx context.Context, namespace, podName, containerName string, cmd []string) error {
-	req := h.k8sClient.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec")
+	return h.ExecCommandInPodWithRetry(ctx, namespace, podName, containerName, cmd, 3, 5*time.Second)
+}
 
-	req.VersionedParams(&corev1.PodExecOptions{
-		Container: containerName,
-		Command:   cmd,
-		Stdout:    true,
-		Stderr:    true,
-	}, scheme.ParameterCodec)
+// ExecCommandInPodWithRetry executes a command in a Pod with retry mechanism
+// maxRetries: maximum number of retry attempts (0 means no retry)
+// retryDelay: delay between retries
+func (h *DevboxCommonHelper) ExecCommandInPodWithRetry(ctx context.Context, namespace, podName, containerName string, cmd []string, maxRetries int, retryDelay time.Duration) error {
+	var lastErr error
 
-	var stdout, stderr bytes.Buffer
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("Retry attempt %d/%d after error: %v", attempt, maxRetries, lastErr)
+			time.Sleep(retryDelay)
+		}
 
-	exec, err := remotecommand.NewSPDYExecutor(h.restConfig, "POST", req.URL())
-	if err != nil {
-		return fmt.Errorf("create executor failed: %w", err)
+		req := h.k8sClient.CoreV1().RESTClient().Post().
+			Resource("pods").
+			Name(podName).
+			Namespace(namespace).
+			SubResource("exec")
+
+		req.VersionedParams(&corev1.PodExecOptions{
+			Container: containerName,
+			Command:   cmd,
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+		var stdout, stderr bytes.Buffer
+
+		exec, err := remotecommand.NewSPDYExecutor(h.restConfig, "POST", req.URL())
+		if err != nil {
+			lastErr = fmt.Errorf("create executor failed: %w", err)
+			if isNetworkError(err) {
+				continue // Retry on network errors
+			}
+			return lastErr
+		}
+
+		err = exec.Stream(remotecommand.StreamOptions{
+			Stdout: &stdout,
+			Stderr: &stderr,
+		})
+
+		if err != nil {
+			lastErr = fmt.Errorf("execute command failed: %w, stderr: %s", err, stderr.String())
+			if isNetworkError(err) {
+				continue // Retry on network errors
+			}
+			return lastErr
+		}
+
+		// Success
+		log.Printf("command output:\n%s", stdout.String())
+		if stderr.Len() > 0 {
+			log.Printf("command error output:\n%s", stderr.String())
+		}
+
+		if attempt > 0 {
+			log.Printf("✓ Command succeeded after %d retries", attempt)
+		}
+
+		return nil
 	}
 
-	err = exec.Stream(remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	})
+	return fmt.Errorf("command failed after %d attempts: %w", maxRetries+1, lastErr)
+}
 
-	if err != nil {
-		return fmt.Errorf("execute command failed: %w, stderr: %s", err, stderr.String())
+// isNetworkError checks if an error is a network-related error that should be retried
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
 	}
 
-	log.Printf("command output:\n%s", stdout.String())
-	if stderr.Len() > 0 {
-		log.Printf("command error output:\n%s", stderr.String())
+	errStr := err.Error()
+	// Check for common network errors
+	networkErrorPatterns := []string{
+		"connection timed out",
+		"connection refused",
+		"connect: connection timed out",
+		"dial tcp",
+		"i/o timeout",
+		"TLS handshake timeout",
+		"EOF",
+		"broken pipe",
+		"connection reset by peer",
 	}
 
-	return nil
+	for _, pattern := range networkErrorPatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+
+	return false
 }

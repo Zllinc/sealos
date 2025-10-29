@@ -48,6 +48,11 @@ func NewDevboxStressTester(config *StressTestConfig) (*DevboxStressTester, error
 		}
 	}
 
+	// 配置超时和 QPS，避免在高负载下超时
+	restConfig.Timeout = 2 * time.Minute // API 请求总超时
+	restConfig.QPS = 100                 // 增加 QPS 限制
+	restConfig.Burst = 200               // 增加 Burst 限制
+
 	k8sClient, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create k8s client: %w", err)

@@ -9,7 +9,6 @@ import (
 
 	devboxv1alpha2 "github.com/labring/sealos/controllers/devbox/api/v1alpha2"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -185,7 +184,7 @@ func (t *CrashRecoveryTester) runConcurrentTest(ctx context.Context) *CrashRecov
 }
 
 // testSingleDevboxCrashRecovery tests crash recovery for a single devbox
-// Note: Since Devbox uses restartPolicy=Never, we manually recreate Pod after crash
+// Note: Controller automatically recreates Pod after container crash, we just wait for it
 func (t *CrashRecoveryTester) testSingleDevboxCrashRecovery(ctx context.Context, name string) CrashRecoveryTestDetail {
 	detail := CrashRecoveryTestDetail{
 		DevboxName: name,
@@ -193,7 +192,7 @@ func (t *CrashRecoveryTester) testSingleDevboxCrashRecovery(ctx context.Context,
 
 	startTime := time.Now()
 
-	// Phase 1: Preparation - Create Devbox
+	// Phase 1: Preparation - Create Devbox and write test data
 	log.Printf("[%s] phase 1: create devbox", name)
 	if err := t.createDevbox(ctx, name); err != nil {
 		detail.Error = fmt.Sprintf("create devbox failed: %v", err)
@@ -222,17 +221,18 @@ func (t *CrashRecoveryTester) testSingleDevboxCrashRecovery(ctx context.Context,
 	detail.DataWriteSuccess = true
 	log.Printf("[%s] data write successful", name)
 
-	// Phase 2-4: Crash and Recovery Cycles
-	log.Printf("[%s] starting %d crash-recovery cycles", name, t.config.CrashCycles)
+	// Phase 2: Continuous crash and recovery cycles
+	log.Printf("[%s] starting %d continuous crash-recovery cycles", name, t.config.CrashCycles)
 
 	for cycle := 0; cycle < t.config.CrashCycles; cycle++ {
 		cycleInfo := CrashRecoveryInfo{
 			CycleNumber: cycle + 1,
 		}
 
-		// Phase 2: Crash - Kill critical processes
-		log.Printf("[%s] cycle %d/%d: phase 2 - killing critical processes", name, cycle+1, t.config.CrashCycles)
+		log.Printf("[%s] cycle %d/%d: killing critical processes", name, cycle+1, t.config.CrashCycles)
 		cycleInfo.CrashTime = time.Now()
+
+		// Step 1: Kill critical processes to crash the container
 		if err := t.killCriticalProcesses(ctx, *devbox); err != nil {
 			detail.Error = fmt.Sprintf("kill process failed (cycle %d): %v", cycle+1, err)
 			detail.CrashCycles = cycle
@@ -242,28 +242,10 @@ func (t *CrashRecoveryTester) testSingleDevboxCrashRecovery(ctx context.Context,
 			return detail
 		}
 
-		// Wait for Pod termination (restartPolicy=Never means no auto-restart)
-		log.Printf("[%s] cycle %d/%d: waiting for pod termination", name, cycle+1, t.config.CrashCycles)
-		if err := t.waitForPodTerminated(ctx, *devbox); err != nil {
-			detail.Error = fmt.Sprintf("wait for pod termination failed (cycle %d): %v", cycle+1, err)
-			detail.CrashCycles = cycle
-			detail.TotalDuration = time.Since(startTime)
-			cycleInfo.Error = err.Error()
-			detail.CrashRecoveries = append(detail.CrashRecoveries, cycleInfo)
-			return detail
-		}
-		cycleInfo.PodTerminated = true
-		log.Printf("[%s] cycle %d/%d: pod terminated successfully", name, cycle+1, t.config.CrashCycles)
-
-		// Optional wait after crash
-		if t.config.WaitAfterCrash > 0 {
-			time.Sleep(t.config.WaitAfterCrash)
-		}
-
-		// Phase 3: Manual Recovery - Delete Pod and wait for controller to recreate
-		log.Printf("[%s] cycle %d/%d: phase 3 - deleting pod to trigger recreation", name, cycle+1, t.config.CrashCycles)
-		if err := t.deletePodAndWaitForRecreation(ctx, *devbox); err != nil {
-			detail.Error = fmt.Sprintf("pod recreation failed (cycle %d): %v", cycle+1, err)
+		// Step 2: Wait for Pod to be recreated by Controller
+		log.Printf("[%s] cycle %d/%d: waiting for controller to recreate pod", name, cycle+1, t.config.CrashCycles)
+		if err := t.waitForPodRecreation(ctx, *devbox); err != nil {
+			detail.Error = fmt.Sprintf("wait for pod recreation failed (cycle %d): %v", cycle+1, err)
 			detail.CrashCycles = cycle
 			detail.TotalDuration = time.Since(startTime)
 			cycleInfo.Error = err.Error()
@@ -271,9 +253,8 @@ func (t *CrashRecoveryTester) testSingleDevboxCrashRecovery(ctx context.Context,
 			return detail
 		}
 		cycleInfo.PodRecreated = true
-		log.Printf("[%s] cycle %d/%d: pod recreated successfully", name, cycle+1, t.config.CrashCycles)
 
-		// Wait for new Pod to be ready
+		// Step 3: Wait for new Pod to be fully ready
 		log.Printf("[%s] cycle %d/%d: waiting for new pod ready", name, cycle+1, t.config.CrashCycles)
 		devbox, err = t.helper.WaitForDevboxRunningWithResources(ctx, t.config.Namespace, name, t.config.RecoveryTimeout)
 		if err != nil {
@@ -287,29 +268,26 @@ func (t *CrashRecoveryTester) testSingleDevboxCrashRecovery(ctx context.Context,
 
 		cycleInfo.RecoveryTime = time.Now()
 		cycleInfo.RecoveryDuration = cycleInfo.RecoveryTime.Sub(cycleInfo.CrashTime)
-
-		// Phase 4: Verify data persistence
-		log.Printf("[%s] cycle %d/%d: phase 4 - verifying data persistence", name, cycle+1, t.config.CrashCycles)
-		if err := t.helper.VerifyTestDataInDevbox(ctx, *devbox, dataDir); err != nil {
-			detail.Error = fmt.Sprintf("data verification failed after cycle %d: %v", cycle+1, err)
-			detail.CrashCycles = cycle + 1 // This cycle completed but data lost
-			detail.TotalDuration = time.Since(startTime)
-			cycleInfo.Error = fmt.Sprintf("data verification failed: %v", err)
-			cycleInfo.DataPersisted = false
-			detail.CrashRecoveries = append(detail.CrashRecoveries, cycleInfo)
-			return detail
-		}
-		cycleInfo.DataPersisted = true
 		cycleInfo.Recovered = true
 
-		log.Printf("[%s] cycle %d/%d: ✓ recovery successful (duration: %v, data persisted: true)",
+		log.Printf("[%s] cycle %d/%d: ✓ pod recreated and ready (duration: %v)",
 			name, cycle+1, t.config.CrashCycles, cycleInfo.RecoveryDuration)
 
 		detail.CrashRecoveries = append(detail.CrashRecoveries, cycleInfo)
 	}
 
 	detail.CrashCycles = t.config.CrashCycles
+
+	// Phase 3: Verify data persistence after all crash cycles
+	log.Printf("[%s] phase 3: verifying data persistence after %d crashes", name, t.config.CrashCycles)
+	if err := t.helper.VerifyTestDataInDevbox(ctx, *devbox, dataDir); err != nil {
+		detail.Error = fmt.Sprintf("data verification failed: %v", err)
+		detail.DataVerifySuccess = false
+		detail.TotalDuration = time.Since(startTime)
+		return detail
+	}
 	detail.DataVerifySuccess = true
+	log.Printf("[%s] ✓ data verification successful after %d crashes", name, t.config.CrashCycles)
 
 	detail.TotalDuration = time.Since(startTime)
 	log.Printf("[%s] test completed, total duration: %v", name, detail.TotalDuration)
@@ -421,85 +399,23 @@ func (t *CrashRecoveryTester) killCriticalProcesses(ctx context.Context, devbox 
 	return fmt.Errorf("failed to crash container after %d kill attempts (Note: restartPolicy might be 'Never', check Pod spec)", successfulKills)
 }
 
-// waitForPodTerminated waits for Pod to terminate (all containers stopped)
-// Since restartPolicy=Never, the Pod won't auto-restart
-func (t *CrashRecoveryTester) waitForPodTerminated(ctx context.Context, devbox devboxv1alpha2.Devbox) error {
-	deadline := time.Now().Add(t.config.RecoveryTimeout)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	log.Printf("[%s] waiting for pod termination...", devbox.Name)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if time.Now().After(deadline) {
-				return fmt.Errorf("pod termination timeout")
-			}
-
-			pods, err := t.helper.GetDevboxPods(ctx, devbox)
-			if err != nil {
-				continue
-			}
-
-			if len(pods) == 0 {
-				log.Printf("[%s] ✓ pod has been deleted", devbox.Name)
-				return nil
-			}
-
-			pod := pods[0]
-
-			// Check Pod phase
-			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-				log.Printf("[%s] ✓ pod terminated (phase: %s)", devbox.Name, pod.Status.Phase)
-				return nil
-			}
-
-			// Check container statuses
-			if len(pod.Status.ContainerStatuses) > 0 {
-				containerStatus := pod.Status.ContainerStatuses[0]
-				if containerStatus.State.Terminated != nil {
-					log.Printf("[%s] ✓ container terminated (exit code: %d, reason: %s)",
-						devbox.Name,
-						containerStatus.State.Terminated.ExitCode,
-						containerStatus.State.Terminated.Reason)
-					// Wait a bit for Pod phase to update
-					time.Sleep(2 * time.Second)
-					return nil
-				}
-			}
-
-			log.Printf("[%s] pod still running (phase: %s), waiting...", devbox.Name, pod.Status.Phase)
-		}
-	}
-}
-
-// deletePodAndWaitForRecreation deletes the Pod and waits for Devbox controller to recreate it
-func (t *CrashRecoveryTester) deletePodAndWaitForRecreation(ctx context.Context, devbox devboxv1alpha2.Devbox) error {
-	// Step 1: Get current Pod
+// waitForPodRecreation waits for Pod to be recreated by Devbox controller after crash
+// Detection method: Pod UID changes indicate a new Pod was created
+func (t *CrashRecoveryTester) waitForPodRecreation(ctx context.Context, devbox devboxv1alpha2.Devbox) error {
+	// Step 1: Get current Pod UID (before crash)
 	pods, err := t.helper.GetDevboxPods(ctx, devbox)
 	if err != nil || len(pods) == 0 {
-		return fmt.Errorf("no pod found to delete")
+		return fmt.Errorf("no pod found")
 	}
 
-	oldPodName := pods[0].Name
 	oldPodUID := pods[0].UID
+	log.Printf("[%s] current pod UID: %s", devbox.Name, oldPodUID)
 
-	// Step 2: Delete the Pod
-	log.Printf("[%s] deleting pod %s to trigger recreation...", devbox.Name, oldPodName)
-	err = t.k8sClient.CoreV1().Pods(devbox.Namespace).Delete(ctx, oldPodName, metav1.DeleteOptions{})
-	if err != nil {
-		return fmt.Errorf("delete pod failed: %w", err)
-	}
-
-	// Step 3: Wait for old Pod to be deleted
+	// Step 2: Wait for Pod to be recreated (UID change indicates recreation)
 	deadline := time.Now().Add(t.config.RecoveryTimeout)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	log.Printf("[%s] waiting for old pod deletion...", devbox.Name)
 	for {
 		select {
 		case <-ctx.Done():
@@ -510,21 +426,42 @@ func (t *CrashRecoveryTester) deletePodAndWaitForRecreation(ctx context.Context,
 			}
 
 			pods, err := t.helper.GetDevboxPods(ctx, devbox)
-			if err != nil || len(pods) == 0 {
-				log.Printf("[%s] old pod deleted, waiting for new pod...", devbox.Name)
-				time.Sleep(2 * time.Second) // Give controller time to react
+			if err != nil {
+				// Can't get pods, might be temporary issue, continue waiting
 				continue
 			}
 
-			// Check if this is a new Pod (different UID)
+			if len(pods) == 0 {
+				// Pod deleted, waiting for controller to recreate
+				log.Printf("[%s] pod deleted, waiting for controller to recreate...", devbox.Name)
+				continue
+			}
+
 			newPod := pods[0]
+
+			// Check if this is a new Pod (different UID)
 			if newPod.UID != oldPodUID {
-				log.Printf("[%s] ✓ new pod created: %s (UID changed: %s -> %s)",
-					devbox.Name, newPod.Name, oldPodUID, newPod.UID)
+				log.Printf("[%s] ✓ new pod created by controller (UID: %s -> %s)",
+					devbox.Name, oldPodUID, newPod.UID)
 				return nil
 			}
 
-			log.Printf("[%s] still seeing old pod, waiting for deletion...", devbox.Name)
+			// Still the same Pod, check if it's crashed/terminating
+			if newPod.Status.Phase == corev1.PodFailed ||
+				newPod.Status.Phase == corev1.PodSucceeded {
+				log.Printf("[%s] pod in %s state, waiting for controller to recreate...",
+					devbox.Name, newPod.Status.Phase)
+				continue
+			}
+
+			// Check container status
+			if len(newPod.Status.ContainerStatuses) > 0 {
+				containerStatus := newPod.Status.ContainerStatuses[0]
+				if containerStatus.State.Terminated != nil {
+					log.Printf("[%s] container terminated (exit code: %d), waiting for recreation...",
+						devbox.Name, containerStatus.State.Terminated.ExitCode)
+				}
+			}
 		}
 	}
 }

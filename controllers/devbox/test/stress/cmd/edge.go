@@ -421,49 +421,39 @@ func printUnexpectedDeleteResult(result *edge.UnexpectedDeleteTestResult, verbos
 
 var crashCmd = &cobra.Command{
 	Use:   "crash",
-	Short: "测试容器崩溃后的数据持久化",
-	Long: `测试容器进程崩溃后 LVM 数据的持久化能力和 Controller 的恢复能力。
+	Short: "test container crash recovery",
+	Long: `test container crash recovery.
 
-注意: Devbox 使用 restartPolicy=Never，所以容器不会自动重启。
-本测试通过删除 Pod 触发 Controller 重建 Pod，然后验证 LVM 数据是否持久化。
+test flow:
+1. create devbox and write test data to container
+2. loop N times to execute the following steps:
+   - kill critical container processes (sleep, sudo, sshd, etc.) to cause container crash
+   - wait for Devbox Controller to automatically detect and recreate the Pod
+   - wait for new Pod to be fully ready
+3. verify data integrity (all data should persist after crashes)
 
-测试流程:
-1. 创建 Devbox 并写入测试数据
-2. 杀死容器关键进程（sleep infinity）导致容器终止
-3. 等待 Pod 进入 Terminated 状态
-4. 删除 Pod，触发 Devbox Controller 重建 Pod
-5. 等待新 Pod 就绪
-6. 验证 LVM 数据是否完整保留
-7. 重复步骤 2-6 多次
+flags:
+  --cycles: continuous crash count (default 3)
+  --recovery-timeout: single recovery timeout (default 5m)
+  --data-size: test data size (default 100M)
+  --file-count: test file count (default 5)
 
-核心验证点:
-  - LVM 数据在容器崩溃后是否持久化
-  - Devbox Controller 能否正确重建 Pod
-  - 多次崩溃-恢复循环后数据完整性
-
-参数说明:
-  --cycles: 崩溃-恢复循环次数（默认 3）
-  --recovery-timeout: 单次恢复超时时间（默认 5m）
-  --wait-after-crash: 崩溃后等待时间（默认 5s）
-  --data-size: 测试数据大小（默认 100M）
-  --file-count: 测试文件数量（默认 5）
-
-示例:
-  # 基础测试：单次崩溃
+examples:
+  # basic test: single crash
   devbox-stress edge crash --count 1 --cycles 1
 
-  # 多次崩溃测试
+  # continuous crash test 5 times
   devbox-stress edge crash --count 1 --cycles 5
 
-  # 并发测试：3 个 Devbox，每个崩溃 3 次
+  # concurrent test: 3 devboxes, each with 3 continuous crashes
   devbox-stress edge crash --count 3 --concurrent 3 --cycles 3
 
-  # 大数据持久化测试
+  # large data persistence test (500M data, 3 crashes)
   devbox-stress edge crash --count 2 --cycles 3 \
     --data-size 500M --file-count 20
 
-  # 完整测试 + 清理
-  devbox-stress edge crash --count 3 --cycles 5 --cleanup
+  # stress test: continuous crashes 10 times + cleanup
+  devbox-stress edge crash --count 1 --cycles 10 --cleanup
 `,
 	Run: runCrashRecoveryTest,
 }
@@ -582,11 +572,7 @@ func printCrashRecoveryResult(result *edge.CrashRecoveryTestResult, verbose bool
 				for _, recovery := range detail.CrashRecoveries {
 					fmt.Printf("    cycle %d: ", recovery.CycleNumber)
 					if recovery.Recovered {
-						fmt.Printf("✓ recovered in %v (terminated: %v, recreated: %v, data persisted: %v)\n",
-							recovery.RecoveryDuration,
-							recovery.PodTerminated,
-							recovery.PodRecreated,
-							recovery.DataPersisted)
+						fmt.Printf("✓ pod recreated in %v\n", recovery.RecoveryDuration)
 					} else {
 						fmt.Printf("✗ failed - %s\n", recovery.Error)
 					}

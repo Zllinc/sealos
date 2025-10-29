@@ -188,15 +188,13 @@ type CrashRecoveryTestDetail struct {
 	Error             string              // Error message
 }
 
-// CrashRecoveryInfo information of a single crash recovery
+// CrashRecoveryInfo information of a single crash recovery cycle
 type CrashRecoveryInfo struct {
 	CycleNumber      int           // Cycle number
 	CrashTime        time.Time     // Crash time
 	RecoveryTime     time.Time     // Recovery time
 	RecoveryDuration time.Duration // Recovery duration
-	PodTerminated    bool          // Whether Pod terminated after crash
 	PodRecreated     bool          // Whether Pod was recreated by controller
-	DataPersisted    bool          // Whether data persisted after recovery
 	Recovered        bool          // Whether recovered successfully
 	Error            string        // Error message
 }

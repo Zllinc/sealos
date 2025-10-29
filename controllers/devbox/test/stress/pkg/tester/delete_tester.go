@@ -216,7 +216,7 @@ func (t *DevboxDeleteTester) deleteDevboxesConcurrently(ctx context.Context, dev
 	return result
 }
 
-// deleteDevboxWithCheck 删除 Devbox 并检查资源清理
+// deleteDevboxWithCheck delete Devbox and check resource cleanup
 func (t *DevboxDeleteTester) deleteDevboxWithCheck(ctx context.Context, devbox devboxv1alpha2.Devbox) DeleteTestDetail {
 	detail := DeleteTestDetail{
 		DevboxName: devbox.Name,
@@ -224,25 +224,25 @@ func (t *DevboxDeleteTester) deleteDevboxWithCheck(ctx context.Context, devbox d
 
 	startTime := time.Now()
 
-	// 记录 ContentID（用于 LVM 检查）
+	// record ContentID (for LVM check)
 	contentID := devbox.Status.ContentID
 
-	// 步骤 1: 删除 Devbox
+	// step 1: delete Devbox
 	deleteStart := time.Now()
 	err := t.ctrlClient.Delete(ctx, &devbox)
 	detail.DeleteDuration = time.Since(deleteStart)
 
 	if err != nil {
-		detail.Error = fmt.Sprintf("删除 Devbox 失败: %v", err)
-		log.Printf("[%s] 删除失败: %v", devbox.Name, err)
+		detail.Error = fmt.Sprintf("delete Devbox failed: %v", err)
+		log.Printf("[%s] delete failed: %v", devbox.Name, err)
 		detail.TotalDuration = time.Since(startTime)
 		return detail
 	}
 
 	detail.DeleteSuccess = true
-	log.Printf("[%s] 删除命令已发送，开始监控资源清理...", devbox.Name)
+	log.Printf("[%s] delete command sent, starting to monitor resource cleanup...", devbox.Name)
 
-	// 步骤 2: 监控资源清理
+	// step 2: monitor resource cleanup
 	cleanupStart := time.Now()
 	cleanupCtx, cancel := context.WithTimeout(ctx, t.config.DeleteTimeout)
 	defer cancel()
@@ -253,33 +253,33 @@ func (t *DevboxDeleteTester) deleteDevboxWithCheck(ctx context.Context, devbox d
 	for {
 		select {
 		case <-cleanupCtx.Done():
-			// 超时，检查最终状态
+			// timeout, check final state
 			detail.CleanupDuration = time.Since(cleanupStart)
 			detail.TotalDuration = time.Since(startTime)
 			t.checkFinalResourceState(ctx, devbox, contentID, &detail)
 			if !detail.DevboxCleaned || !detail.PodCleaned || !detail.ServiceCleaned ||
 				!detail.SecretCleaned || !detail.LVMCleaned {
-				detail.Error = fmt.Sprintf("资源清理超时: %s", detail.RemainingResource)
+				detail.Error = fmt.Sprintf("resource cleanup timeout: %s", detail.RemainingResource)
 			}
 			return detail
 
 		case <-ticker.C:
-			// 检查资源是否清理完成
+			// check if resource cleanup is completed
 			if t.checkResourceCleanup(ctx, devbox, contentID, &detail) {
 				detail.CleanupDuration = time.Since(cleanupStart)
 				detail.TotalDuration = time.Since(startTime)
-				log.Printf("[%s] 所有资源已清理完成，耗时: %v", devbox.Name, detail.CleanupDuration)
+				log.Printf("[%s] all resources cleaned up, duration: %v", devbox.Name, detail.CleanupDuration)
 				return detail
 			}
 		}
 	}
 }
 
-// checkResourceCleanup 检查资源是否清理完成
+// checkResourceCleanup checks if resources are cleaned up
 func (t *DevboxDeleteTester) checkResourceCleanup(ctx context.Context, devbox devboxv1alpha2.Devbox, contentID string, detail *DeleteTestDetail) bool {
 	allCleaned := true
 
-	// 1. 检查 Devbox 是否已删除
+	// 1. check if Devbox is deleted
 	if !detail.DevboxCleaned {
 		devboxObj := &devboxv1alpha2.Devbox{}
 		err := t.ctrlClient.Get(ctx, client.ObjectKey{
@@ -288,23 +288,23 @@ func (t *DevboxDeleteTester) checkResourceCleanup(ctx context.Context, devbox de
 		}, devboxObj)
 		if errors.IsNotFound(err) {
 			detail.DevboxCleaned = true
-			log.Printf("[%s] ✓ Devbox 已删除", devbox.Name)
+			log.Printf("[%s] ✓ Devbox deleted", devbox.Name)
 		} else {
 			allCleaned = false
 		}
 	}
 
-	// 2. 检查 Pod 是否已删除
+	// 2. check if Pod is deleted
 	if !detail.PodCleaned {
 		if !t.helper.IsPodRunning(ctx, devbox) {
-			// Pod 不存在或不在运行
+			// Pod does not exist or is not running
 			podList := &corev1.PodList{}
 			err := t.ctrlClient.List(ctx, podList,
 				client.InNamespace(devbox.Namespace),
 				client.MatchingLabels{"app.kubernetes.io/name": devbox.Name})
 			if err == nil && len(podList.Items) == 0 {
 				detail.PodCleaned = true
-				log.Printf("[%s] ✓ Pod 已删除", devbox.Name)
+				log.Printf("[%s] ✓ Pod deleted", devbox.Name)
 			} else {
 				allCleaned = false
 			}
@@ -313,37 +313,37 @@ func (t *DevboxDeleteTester) checkResourceCleanup(ctx context.Context, devbox de
 		}
 	}
 
-	// 3. 检查 Service 是否已删除
+	// 3. check if Service is deleted
 	if !detail.ServiceCleaned {
 		if !t.helper.IsServiceCreated(ctx, devbox) {
 			detail.ServiceCleaned = true
-			log.Printf("[%s] ✓ Service 已删除", devbox.Name)
+			log.Printf("[%s] ✓ Service deleted", devbox.Name)
 		} else {
 			allCleaned = false
 		}
 	}
 
-	// 4. 检查 Secret 是否已删除
+	// 4. check if Secret is deleted
 	if !detail.SecretCleaned {
 		if !t.helper.IsSecretCreated(ctx, devbox) {
 			detail.SecretCleaned = true
-			log.Printf("[%s] ✓ Secret 已删除", devbox.Name)
+			log.Printf("[%s] ✓ Secret deleted", devbox.Name)
 		} else {
 			allCleaned = false
 		}
 	}
 
-	// 5. 检查 LVM 是否已删除
+	// 5. check if LVM is deleted
 	if !detail.LVMCleaned {
 		if contentID != "" {
 			if !t.helper.IsLVMCreated(ctx, devbox) {
 				detail.LVMCleaned = true
-				log.Printf("[%s] ✓ LVM 逻辑卷已删除", devbox.Name)
+				log.Printf("[%s] ✓ LVM logical volume deleted", devbox.Name)
 			} else {
 				allCleaned = false
 			}
 		} else {
-			// 没有 ContentID，认为 LVM 已清理
+			// no ContentID, consider LVM cleaned
 			detail.LVMCleaned = true
 		}
 	}
@@ -351,7 +351,7 @@ func (t *DevboxDeleteTester) checkResourceCleanup(ctx context.Context, devbox de
 	return allCleaned
 }
 
-// checkFinalResourceState 检查最终资源状态
+// checkFinalResourceState checks the final resource state
 func (t *DevboxDeleteTester) checkFinalResourceState(ctx context.Context, devbox devboxv1alpha2.Devbox, contentID string, detail *DeleteTestDetail) {
 	var remaining []string
 
