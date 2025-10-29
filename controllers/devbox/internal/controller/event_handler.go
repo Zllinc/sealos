@@ -23,6 +23,7 @@ import (
 )
 
 var commitMap = sync.Map{}
+var cleanupMap = sync.Map{}
 
 type EventHandler struct {
 	Committer           commit.Committer
@@ -237,6 +238,17 @@ func (h *EventHandler) generateImageName(devbox *devboxv1alpha2.Devbox) string {
 func (h *EventHandler) removeStorage(ctx context.Context, event *corev1.Event) error {
 	h.Logger.Info("Starting devbox deletion Storage cleanup", "devbox", event.Name, "message", event.Message)
 	devboxName, contentID, baseImage := h.parseStorageCleanupAnno(event.Annotations)
+
+	// if cleanup is already in progress, skip duplicate request
+	if _, loaded := cleanupMap.LoadOrStore(contentID, true); loaded {
+		h.Logger.Info("cleanup already in progress, skipping duplicate request",
+			"contentID", contentID,
+			"devboxName", devboxName,
+			"event", event.Name)
+		return nil
+	}
+
+	defer cleanupMap.Delete(contentID)
 
 	// Use k8s.io/client-go/util/retry for robust retry logic
 	err := retry.OnError(
