@@ -73,7 +73,7 @@ func init() {
 
 	// Commit specific flags
 	commitCmd.PersistentFlags().IntVarP(&commitCount, "count", "c", 5, "number of devbox to test")
-	commitCmd.PersistentFlags().DurationVar(&commitTimeout, "timeout", 20*time.Minute, "commit operation timeout")
+	commitCmd.PersistentFlags().DurationVar(&commitTimeout, "timeout", 8*time.Hour, "commit operation timeout")
 	commitCmd.PersistentFlags().StringVar(&dataSize, "datasize", "100M", "size of each test file")
 	commitCmd.PersistentFlags().BoolVar(&verifyData, "verify", false, "verify data integrity")
 	commitCmd.PersistentFlags().IntVar(&commitConcurrency, "concurrent", 3, "number of concurrent operation")

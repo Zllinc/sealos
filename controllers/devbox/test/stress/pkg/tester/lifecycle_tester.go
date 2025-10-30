@@ -314,6 +314,15 @@ func (t *DevboxLifecycleTester) phase2_StoppedCommitAndVerify(ctx context.Contex
 		return fmt.Errorf("写入数据失败: %w", err)
 	}
 
+	// 强制同步文件系统，确保数据写入磁盘
+	log.Printf("[%s] 同步文件系统，确保数据持久化", name)
+	syncCmd := []string{"sync"}
+	if err := t.execCommandInPod(ctx, devbox.Namespace, devbox.Name, devbox.Name, syncCmd); err != nil {
+		log.Printf("[%s] ⚠ 同步文件系统失败: %v (继续执行)", name, err)
+	}
+	// 等待一小段时间，确保同步完成
+	time.Sleep(3 * time.Second)
+
 	// 修改状态为 Stopped 触发 commit
 	log.Printf("[%s] 修改状态为 Stopped 触发 commit", name)
 	devbox.Spec.State = devboxv1alpha2.DevboxStateStopped
@@ -368,6 +377,15 @@ func (t *DevboxLifecycleTester) phase3_ShutdownCommitAndVerify(ctx context.Conte
 	if err := t.writeDataToDirectory(ctx, *devbox, "test_data_phase2", t.config.Data2Size, t.config.FileCount); err != nil {
 		return fmt.Errorf("写入数据失败: %w", err)
 	}
+
+	// 强制同步文件系统，确保数据写入磁盘（非常重要！）
+	log.Printf("[%s] 同步文件系统，确保数据持久化到 LVM", name)
+	syncCmd := []string{"sync"}
+	if err := t.execCommandInPod(ctx, devbox.Namespace, devbox.Name, devbox.Name, syncCmd); err != nil {
+		log.Printf("[%s] ⚠ 同步文件系统失败: %v (继续执行)", name, err)
+	}
+	// 等待一小段时间，确保同步完成并让 I/O 缓冲区刷新
+	time.Sleep(3 * time.Second)
 
 	// 修改状态为 Shutdown 触发 commit
 	log.Printf("[%s] 修改状态为 Shutdown 触发 commit", name)
