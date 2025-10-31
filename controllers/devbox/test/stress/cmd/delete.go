@@ -60,7 +60,7 @@ func init() {
 	deleteCmd.Flags().DurationVar(&deleteTimeout, "timeout", 10*time.Minute, "timeout for single devbox deletion")
 	deleteCmd.Flags().DurationVar(&checkInterval, "check-interval", 2*time.Second, "resource check interval")
 	deleteCmd.Flags().DurationVar(&testTimeout, "test-timeout", 30*time.Minute, "total test timeout")
-	deleteCmd.Flags().BoolVarP(&verboseOutput, "verbose", "v", true, "display detailed output")
+	deleteCmd.Flags().BoolVarP(&verboseOutput, "verbose", "v", false, "display detailed output")
 }
 
 func runDeleteTest(cmd *cobra.Command, args []string) {

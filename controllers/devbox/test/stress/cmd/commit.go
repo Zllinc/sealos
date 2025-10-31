@@ -78,7 +78,7 @@ func init() {
 	commitCmd.PersistentFlags().BoolVar(&verifyData, "verify", false, "verify data integrity")
 	commitCmd.PersistentFlags().IntVar(&commitConcurrency, "concurrent", 3, "number of concurrent operation")
 	commitCmd.PersistentFlags().IntVar(&fileCount, "filecount", 5, "number of files created for each devbox")
-	commitCmd.PersistentFlags().BoolVarP(&commitVerbose, "verbose", "v", true, "display detailed output")
+	commitCmd.PersistentFlags().BoolVarP(&commitVerbose, "verbose", "v", false, "display detailed output")
 }
 
 func runStoppedCommitTest(cmd *cobra.Command, args []string) error {

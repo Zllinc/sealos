@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -104,60 +103,49 @@ func (t *DevboxCommitTester) RunCommitTest(ctx context.Context) (*CommitTestResu
 
 	result.TotalDevboxes = actualCount
 
-	// 步骤 2: 并发写入测试数据
-	log.Printf("\n=== 步骤 2: 写入测试数据 (并发数: %d, 文件数: %d) ===", t.config.ConcurrentCount, t.config.FileCount)
-	writeStart := time.Now()
-	if err := t.writeTestDataConcurrently(ctx, devboxes); err != nil {
-		return nil, fmt.Errorf("写入测试数据失败: %w", err)
-	}
-	result.WriteDataTime = time.Since(writeStart)
+	// 步骤 2: 并发测试每个 Devbox 的完整流程
+	log.Printf("\n=== 步骤 2: 开始并发测试 (并发级别: %d) ===", t.config.ConcurrentCount)
 
-	// 计算写入速度
-	dataSizeBytes, _ := parseDataSize(t.config.DataSize)
-	totalDataSize := dataSizeBytes * int64(actualCount) * int64(t.config.FileCount)
-	result.WriteSpeedMBps = float64(totalDataSize) / (1024 * 1024) / result.WriteDataTime.Seconds()
-
-	log.Printf("数据写入完成，耗时: %v, 写入速度: %.2f MB/s",
-		result.WriteDataTime, result.WriteSpeedMBps)
-
-	// 步骤 3: 并发触发 Commit
-	log.Printf("\n=== 步骤 3: 触发 Commit (修改状态为 %s) ===", t.config.TargetState)
-	commitStart := time.Now()
-	if err := t.triggerCommitConcurrently(ctx, devboxes); err != nil {
-		return nil, fmt.Errorf("触发 Commit 失败: %w", err)
-	}
-
-	// 步骤 4: 等待 Commit 完成
-	log.Printf("\n=== 步骤 4: 等待 Commit 完成 ===")
-	commitResults := t.waitForCommitsConcurrently(ctx, devboxes)
-	result.CommitTime = time.Since(commitStart)
+	details := t.testDevboxesFullLifecycle(ctx, devboxes)
 
 	// 统计结果
-	for _, detail := range commitResults {
+	var totalWriteTime, totalCommitTime, totalVerifyTime time.Duration
+	for _, detail := range details {
 		result.Details = append(result.Details, detail)
+
+		totalWriteTime += detail.WriteDuration
+		totalCommitTime += detail.CommitDuration
+		totalVerifyTime += detail.VerifyDuration
+
 		if detail.CommitSuccess {
 			result.SuccessfulCommits++
 		} else {
 			result.FailedCommits++
-			if detail.Error != "" {
-				result.ErrorMessages = append(result.ErrorMessages, fmt.Sprintf("%s: %s", detail.DevboxName, detail.Error))
-			}
 		}
-	}
 
-	// 步骤 5: 验证数据（可选）
-	if t.config.VerifyData {
-		log.Printf("\n=== 步骤 5: 恢复 Running 并验证数据 ===")
-		verifyStart := time.Now()
-		if err := t.verifyDataAfterCommit(ctx, devboxes, &result.Details); err != nil {
-			log.Printf("数据验证失败: %v", err)
+		if detail.Error != "" {
+			result.ErrorMessages = append(result.ErrorMessages, fmt.Sprintf("%s: %s", detail.DevboxName, detail.Error))
 		}
-		result.VerifyTime = time.Since(verifyStart)
 	}
 
 	result.TotalTestTime = time.Since(startTime)
-	if result.CommitTime.Seconds() > 0 {
-		result.CommitQPS = float64(result.SuccessfulCommits) / result.CommitTime.Seconds()
+
+	// 计算平均时间
+	if actualCount > 0 {
+		result.WriteDataTime = totalWriteTime / time.Duration(actualCount)
+		result.CommitTime = totalCommitTime / time.Duration(actualCount)
+		result.VerifyTime = totalVerifyTime / time.Duration(actualCount)
+	}
+
+	// 计算写入速度和 QPS
+	dataSizeBytes, _ := parseDataSize(t.config.DataSize)
+	if result.WriteDataTime.Seconds() > 0 {
+		totalDataSize := dataSizeBytes * int64(actualCount) * int64(t.config.FileCount)
+		result.WriteSpeedMBps = float64(totalDataSize) / (1024 * 1024) / result.WriteDataTime.Seconds()
+	}
+
+	if result.TotalTestTime.Seconds() > 0 {
+		result.CommitQPS = float64(result.SuccessfulCommits) / result.TotalTestTime.Seconds()
 	}
 
 	// 打印汇总
@@ -166,12 +154,12 @@ func (t *DevboxCommitTester) RunCommitTest(ctx context.Context) (*CommitTestResu
 	log.Printf("成功 Commit: %d (%.1f%%)", result.SuccessfulCommits,
 		float64(result.SuccessfulCommits)/float64(result.TotalDevboxes)*100)
 	log.Printf("失败 Commit: %d", result.FailedCommits)
-	log.Printf("写入数据耗时: %v (速度: %.2f MB/s)", result.WriteDataTime, result.WriteSpeedMBps)
-	log.Printf("Commit 耗时: %v (QPS: %.2f)", result.CommitTime, result.CommitQPS)
+	log.Printf("平均写入耗时: %v (速度: %.2f MB/s)", result.WriteDataTime, result.WriteSpeedMBps)
+	log.Printf("平均 Commit 耗时: %v", result.CommitTime)
 	if t.config.VerifyData {
-		log.Printf("验证耗时: %v", result.VerifyTime)
+		log.Printf("平均验证耗时: %v", result.VerifyTime)
 	}
-	log.Printf("总耗时: %v", result.TotalTestTime)
+	log.Printf("总测试耗时: %v (QPS: %.2f)", result.TotalTestTime, result.CommitQPS)
 
 	if len(result.ErrorMessages) > 0 {
 		log.Printf("\n错误信息 (前 10 条):")
@@ -185,6 +173,136 @@ func (t *DevboxCommitTester) RunCommitTest(ctx context.Context) (*CommitTestResu
 	}
 
 	return result, nil
+}
+
+// testDevboxesFullLifecycle tests full lifecycle for each Devbox concurrently
+func (t *DevboxCommitTester) testDevboxesFullLifecycle(ctx context.Context, devboxes []devboxv1alpha2.Devbox) []CommitTestDetail {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	details := make([]CommitTestDetail, 0, len(devboxes))
+	semaphore := make(chan struct{}, t.config.ConcurrentCount)
+
+	for i, devbox := range devboxes {
+		wg.Add(1)
+		go func(index int, db devboxv1alpha2.Devbox) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			log.Printf("[%d/%d] 开始测试 Devbox: %s", index+1, len(devboxes), db.Name)
+
+			// 测试单个 Devbox 的完整流程
+			detail := t.testSingleDevboxFullLifecycle(ctx, db, index+1, len(devboxes))
+
+			mu.Lock()
+			details = append(details, detail)
+			mu.Unlock()
+
+			if detail.Error == "" {
+				log.Printf("[%d/%d] ✓ Devbox 测试成功: %s (总耗时: %v)",
+					index+1, len(devboxes), db.Name, detail.TotalDuration)
+			} else {
+				log.Printf("[%d/%d] ✗ Devbox 测试失败: %s - %s",
+					index+1, len(devboxes), db.Name, detail.Error)
+			}
+		}(i, devbox)
+	}
+
+	wg.Wait()
+	return details
+}
+
+// testSingleDevboxFullLifecycle tests complete lifecycle for a single Devbox
+func (t *DevboxCommitTester) testSingleDevboxFullLifecycle(ctx context.Context, devbox devboxv1alpha2.Devbox, index, total int) CommitTestDetail {
+	detail := CommitTestDetail{
+		DevboxName: devbox.Name,
+	}
+	testStart := time.Now()
+
+	// 阶段 1: 写入测试数据
+	log.Printf("[%d/%d] 写入数据: %s", index, total, devbox.Name)
+	writeStart := time.Now()
+	if err := t.helper.WriteTestDataToDevbox(ctx, devbox, "test_commit_data", t.config.DataSize, t.config.FileCount); err != nil {
+		detail.Error = fmt.Sprintf("写入数据失败: %v", err)
+		detail.TotalDuration = time.Since(testStart)
+		return detail
+	}
+	detail.WriteDuration = time.Since(writeStart)
+	detail.WriteSuccess = true
+	log.Printf("[%d/%d] ✓ 数据写入完成: %s (耗时: %v)", index, total, devbox.Name, detail.WriteDuration)
+
+	// 阶段 2: 同步文件系统
+	log.Printf("[%d/%d] 同步文件系统: %s", index, total, devbox.Name)
+	syncCmd := []string{"sync"}
+	if err := t.helper.ExecCommandInPod(ctx, devbox.Namespace, devbox.Name, devbox.Name, syncCmd); err != nil {
+		log.Printf("[%d/%d] ⚠ 同步文件系统失败: %s - %v (继续执行)", index, total, devbox.Name, err)
+	}
+	time.Sleep(3 * time.Second)
+
+	// 阶段 3: 触发 Commit
+	log.Printf("[%d/%d] 触发 Commit (状态: %s): %s", index, total, t.config.TargetState, devbox.Name)
+	commitStart := time.Now()
+	if err := t.changeDevboxState(ctx, devbox.Name, t.config.TargetState); err != nil {
+		detail.Error = fmt.Sprintf("触发 Commit 失败: %v", err)
+		detail.TotalDuration = time.Since(testStart)
+		return detail
+	}
+
+	// 阶段 4: 等待 Commit 完成
+	log.Printf("[%d/%d] 等待 Commit 完成: %s", index, total, devbox.Name)
+	targetState := t.getTargetDevboxState()
+	if err := t.helper.WaitForDevboxState(ctx, t.config.Namespace, devbox.Name, targetState, t.config.CommitTimeout); err != nil {
+		detail.Error = fmt.Sprintf("等待 Commit 超时: %v", err)
+		detail.CommitDuration = time.Since(commitStart)
+		detail.TotalDuration = time.Since(testStart)
+		return detail
+	}
+	detail.CommitDuration = time.Since(commitStart)
+	detail.CommitSuccess = true
+	log.Printf("[%d/%d] ✓ Commit 完成: %s (耗时: %v)", index, total, devbox.Name, detail.CommitDuration)
+
+	// 阶段 5: 验证数据（可选）
+	if t.config.VerifyData {
+		// 恢复 Running 状态
+		log.Printf("[%d/%d] 恢复 Running 状态: %s", index, total, devbox.Name)
+		if err := t.changeDevboxState(ctx, devbox.Name, "Running"); err != nil {
+			detail.Error = fmt.Sprintf("恢复 Running 失败: %v", err)
+			detail.TotalDuration = time.Since(testStart)
+			return detail
+		}
+
+		// 等待 Running 就绪（包含 Pod 就绪）
+		log.Printf("[%d/%d] 等待 Running 就绪: %s", index, total, devbox.Name)
+		if _, err := t.helper.WaitForDevboxRunningWithResources(ctx, t.config.Namespace, devbox.Name, 5*time.Minute); err != nil {
+			detail.Error = fmt.Sprintf("等待 Running 超时: %v", err)
+			detail.TotalDuration = time.Since(testStart)
+			return detail
+		}
+
+		// 验证数据完整性
+		log.Printf("[%d/%d] 验证数据完整性: %s", index, total, devbox.Name)
+		verifyStart := time.Now()
+		// 重新获取 Devbox 对象（状态已变化）
+		updatedDevbox := &devboxv1alpha2.Devbox{}
+		if err := t.ctrlClient.Get(ctx, client.ObjectKey{Namespace: devbox.Namespace, Name: devbox.Name}, updatedDevbox); err != nil {
+			detail.Error = fmt.Sprintf("获取 Devbox 失败: %v", err)
+			detail.TotalDuration = time.Since(testStart)
+			return detail
+		}
+
+		if err := t.helper.VerifyTestDataInDevbox(ctx, *updatedDevbox, "test_commit_data"); err != nil {
+			detail.Error = fmt.Sprintf("数据验证失败: %v", err)
+			detail.VerifyDuration = time.Since(verifyStart)
+			detail.TotalDuration = time.Since(testStart)
+			return detail
+		}
+		detail.VerifyDuration = time.Since(verifyStart)
+		detail.VerifySuccess = true
+		log.Printf("[%d/%d] ✓ 数据验证成功: %s (耗时: %v)", index, total, devbox.Name, detail.VerifyDuration)
+	}
+
+	detail.TotalDuration = time.Since(testStart)
+	return detail
 }
 
 // findRunningDevboxes 查找运行中的 Devbox
@@ -206,242 +324,6 @@ func (t *DevboxCommitTester) findRunningDevboxes(ctx context.Context) ([]devboxv
 	}
 
 	return runningDevboxes, nil
-}
-
-// writeTestDataConcurrently 并发写入测试数据
-func (t *DevboxCommitTester) writeTestDataConcurrently(ctx context.Context, devboxes []devboxv1alpha2.Devbox) error {
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var errors []string
-	semaphore := make(chan struct{}, t.config.ConcurrentCount)
-
-	for i, devbox := range devboxes {
-		wg.Add(1)
-		go func(index int, db devboxv1alpha2.Devbox) {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			log.Printf("[%d/%d] 写入数据到 Devbox: %s", index+1, len(devboxes), db.Name)
-
-			// 使用通用方法写入数据
-			if err := t.helper.WriteTestDataToDevbox(ctx, db, "test_commit_data", t.config.DataSize, t.config.FileCount); err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Sprintf("%s: %v", db.Name, err))
-				mu.Unlock()
-				log.Printf("[%d/%d] 写入数据失败: %s - %v", index+1, len(devboxes), db.Name, err)
-				return
-			}
-
-			log.Printf("[%d/%d] ✓ 数据写入成功: %s", index+1, len(devboxes), db.Name)
-		}(i, devbox)
-	}
-
-	wg.Wait()
-
-	if len(errors) > 0 {
-		return fmt.Errorf("写入数据失败: %s", strings.Join(errors, "; "))
-	}
-
-	return nil
-}
-
-// triggerCommitConcurrently 并发触发 Commit
-func (t *DevboxCommitTester) triggerCommitConcurrently(ctx context.Context, devboxes []devboxv1alpha2.Devbox) error {
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var errors []string
-	semaphore := make(chan struct{}, t.config.ConcurrentCount)
-
-	for i, devbox := range devboxes {
-		wg.Add(1)
-		go func(index int, db devboxv1alpha2.Devbox) {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			log.Printf("[%d/%d] 触发 Commit: %s", index+1, len(devboxes), db.Name)
-
-			// 修改状态触发 Commit
-			if err := t.changeDevboxState(ctx, db.Name, t.config.TargetState); err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Sprintf("%s: %v", db.Name, err))
-				mu.Unlock()
-				log.Printf("[%d/%d] 触发 Commit 失败: %s - %v", index+1, len(devboxes), db.Name, err)
-				return
-			}
-
-			log.Printf("[%d/%d] ✓ Commit 已触发: %s", index+1, len(devboxes), db.Name)
-		}(i, devbox)
-	}
-
-	wg.Wait()
-
-	if len(errors) > 0 {
-		return fmt.Errorf("触发 Commit 失败: %s", strings.Join(errors, "; "))
-	}
-
-	return nil
-}
-
-// waitForCommitsConcurrently 并发等待 Commit 完成
-func (t *DevboxCommitTester) waitForCommitsConcurrently(ctx context.Context, devboxes []devboxv1alpha2.Devbox) []CommitTestDetail {
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	details := make([]CommitTestDetail, 0, len(devboxes))
-	semaphore := make(chan struct{}, t.config.ConcurrentCount)
-
-	for i, devbox := range devboxes {
-		wg.Add(1)
-		go func(index int, db devboxv1alpha2.Devbox) {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			detail := CommitTestDetail{
-				DevboxName:   db.Name,
-				WriteSuccess: true, // 写入阶段已完成
-			}
-
-			commitStart := time.Now()
-			log.Printf("[%d/%d] 等待 Commit 完成: %s", index+1, len(devboxes), db.Name)
-
-			// 等待状态变为目标状态
-			targetState := t.getTargetDevboxState()
-			err := t.helper.WaitForDevboxState(ctx, t.config.Namespace, db.Name, targetState, t.config.CommitTimeout)
-			detail.CommitDuration = time.Since(commitStart)
-
-			if err != nil {
-				detail.Error = fmt.Sprintf("等待 Commit 超时: %v", err)
-				detail.CommitSuccess = false
-				log.Printf("[%d/%d] ✗ Commit 超时: %s", index+1, len(devboxes), db.Name)
-			} else {
-				detail.CommitSuccess = true
-				log.Printf("[%d/%d] ✓ Commit 完成: %s (耗时: %v)", index+1, len(devboxes), db.Name, detail.CommitDuration)
-			}
-
-			detail.TotalDuration = detail.CommitDuration
-
-			mu.Lock()
-			details = append(details, detail)
-			mu.Unlock()
-		}(i, devbox)
-	}
-
-	wg.Wait()
-	return details
-}
-
-// verifyDataAfterCommit 验证 Commit 后的数据（恢复 Running 并验证）
-func (t *DevboxCommitTester) verifyDataAfterCommit(ctx context.Context, devboxes []devboxv1alpha2.Devbox, details *[]CommitTestDetail) error {
-	// 步骤 1: 恢复到 Running 状态
-	log.Printf("恢复所有 Devbox 到 Running 状态...")
-	if err := t.restoreToRunningConcurrently(ctx, devboxes); err != nil {
-		return fmt.Errorf("恢复 Running 失败: %w", err)
-	}
-
-	// 步骤 2: 验证数据
-	log.Printf("验证数据完整性...")
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	semaphore := make(chan struct{}, t.config.ConcurrentCount)
-
-	for i := range devboxes {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			devbox := devboxes[index]
-			verifyStart := time.Now()
-
-			log.Printf("[%d/%d] 验证数据: %s", index+1, len(devboxes), devbox.Name)
-
-			// 使用通用方法验证数据
-			err := t.helper.VerifyTestDataInDevbox(ctx, devbox, "test_commit_data")
-
-			mu.Lock()
-			// 找到对应的 detail 并更新
-			for j := range *details {
-				if (*details)[j].DevboxName == devbox.Name {
-					(*details)[j].VerifyDuration = time.Since(verifyStart)
-					(*details)[j].TotalDuration += (*details)[j].VerifyDuration
-					if err != nil {
-						(*details)[j].VerifySuccess = false
-						(*details)[j].Error += fmt.Sprintf("; 验证失败: %v", err)
-						log.Printf("[%d/%d] ✗ 数据验证失败: %s", index+1, len(devboxes), devbox.Name)
-					} else {
-						(*details)[j].VerifySuccess = true
-						log.Printf("[%d/%d] ✓ 数据验证成功: %s", index+1, len(devboxes), devbox.Name)
-					}
-					break
-				}
-			}
-			mu.Unlock()
-		}(i)
-	}
-
-	wg.Wait()
-	return nil
-}
-
-// restoreToRunningConcurrently 并发恢复到 Running 状态
-func (t *DevboxCommitTester) restoreToRunningConcurrently(ctx context.Context, devboxes []devboxv1alpha2.Devbox) error {
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var errors []string
-	semaphore := make(chan struct{}, t.config.ConcurrentCount)
-
-	// 步骤 1: 修改状态为 Running
-	for i, devbox := range devboxes {
-		wg.Add(1)
-		go func(index int, db devboxv1alpha2.Devbox) {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			if err := t.changeDevboxState(ctx, db.Name, "Running"); err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Sprintf("%s: %v", db.Name, err))
-				mu.Unlock()
-			}
-		}(i, devbox)
-	}
-	wg.Wait()
-
-	if len(errors) > 0 {
-		return fmt.Errorf("修改状态失败: %s", strings.Join(errors, "; "))
-	}
-
-	// 步骤 2: 等待所有 Devbox Running（包含资源就绪）
-	errors = []string{}
-	for i, devbox := range devboxes {
-		wg.Add(1)
-		go func(index int, db devboxv1alpha2.Devbox) {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			log.Printf("[%d/%d] 等待 Running: %s", index+1, len(devboxes), db.Name)
-			_, err := t.helper.WaitForDevboxRunningWithResources(ctx, t.config.Namespace, db.Name, 5*time.Minute)
-			if err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Sprintf("%s: %v", db.Name, err))
-				mu.Unlock()
-				log.Printf("[%d/%d] ✗ 等待 Running 超时: %s", index+1, len(devboxes), db.Name)
-			} else {
-				log.Printf("[%d/%d] ✓ Running 就绪: %s", index+1, len(devboxes), db.Name)
-			}
-		}(i, devbox)
-	}
-	wg.Wait()
-
-	if len(errors) > 0 {
-		return fmt.Errorf("等待 Running 失败: %s", strings.Join(errors, "; "))
-	}
-
-	return nil
 }
 
 // changeDevboxState 修改 Devbox 状态

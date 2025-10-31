@@ -47,7 +47,7 @@ func init() {
 	concurrentCmd.Flags().DurationVar(&concurrentTimeout, "timeout", 20*time.Minute, "test timeout")
 	concurrentCmd.Flags().DurationVar(&concurrentWaitTime, "wait-timeout", 5*time.Minute, "wait for devbox to become Running timeout")
 	concurrentCmd.Flags().BoolVar(&concurrentCleanup, "cleanup", false, "cleanup after test")
-	concurrentCmd.Flags().BoolVarP(&concurrentVerbose, "verbose", "v", true, "display detailed output")
+	concurrentCmd.Flags().BoolVarP(&concurrentVerbose, "verbose", "v", false, "display detailed output")
 }
 
 func runConcurrentTest(cmd *cobra.Command, args []string) error {

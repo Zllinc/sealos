@@ -300,167 +300,167 @@ func (t *DevboxLifecycleTester) phase1_CreateAndVerifyResources(ctx context.Cont
 	return nil
 }
 
-// phase2_StoppedCommitAndVerify 阶段2: Stopped Commit 测试
+// phase2_StoppedCommitAndVerify phase2: Stopped Commit test
 func (t *DevboxLifecycleTester) phase2_StoppedCommitAndVerify(ctx context.Context, name string) error {
-	// 获取 Devbox
+	// get Devbox
 	devbox := &devboxv1alpha2.Devbox{}
 	if err := t.ctrlClient.Get(ctx, client.ObjectKey{Namespace: t.config.Namespace, Name: name}, devbox); err != nil {
-		return fmt.Errorf("获取 Devbox 失败: %w", err)
+		return fmt.Errorf("get Devbox failed: %w", err)
 	}
 
-	// 写入第一批测试数据
-	log.Printf("[%s] 写入第一批测试数据 (目录: test_data_phase1)", name)
+	// write first batch of test data
+	log.Printf("[%s] write first batch of test data (directory: test_data_phase1)", name)
 	if err := t.writeDataToDirectory(ctx, *devbox, "test_data_phase1", t.config.Data1Size, t.config.FileCount); err != nil {
-		return fmt.Errorf("写入数据失败: %w", err)
+		return fmt.Errorf("write data failed: %w", err)
 	}
 
-	// 强制同步文件系统，确保数据写入磁盘
-	log.Printf("[%s] 同步文件系统，确保数据持久化", name)
+	// force sync file system, ensure data written to disk
+	log.Printf("[%s] sync file system, ensure data persisted", name)
 	syncCmd := []string{"sync"}
 	if err := t.execCommandInPod(ctx, devbox.Namespace, devbox.Name, devbox.Name, syncCmd); err != nil {
-		log.Printf("[%s] ⚠ 同步文件系统失败: %v (继续执行)", name, err)
+		log.Printf("[%s] ⚠ sync file system failed: %v (continue execution)", name, err)
 	}
-	// 等待一小段时间，确保同步完成
+	// wait for a short period, ensure sync completed
 	time.Sleep(3 * time.Second)
 
-	// 修改状态为 Stopped 触发 commit
-	log.Printf("[%s] 修改状态为 Stopped 触发 commit", name)
+	// modify state to Stopped to trigger commit
+	log.Printf("[%s] modify state to Stopped to trigger commit", name)
 	devbox.Spec.State = devboxv1alpha2.DevboxStateStopped
 	if err := t.ctrlClient.Update(ctx, devbox); err != nil {
-		return fmt.Errorf("修改状态失败: %w", err)
+		return fmt.Errorf("modify state failed: %w", err)
 	}
 
-	// 等待 commit 完成
+	// wait for commit complete
 	if err := t.waitForCommitComplete(ctx, name, devboxv1alpha2.DevboxStateStopped, 10*time.Minute); err != nil {
-		return fmt.Errorf("等待 commit 完成超时: %w", err)
+		return fmt.Errorf("wait for commit complete timeout: %w", err)
 	}
 
-	// 恢复 Running 状态
-	log.Printf("[%s] 恢复 Running 状态", name)
+	// restore Running state
+	log.Printf("[%s] restore Running state", name)
 	if err := t.ctrlClient.Get(ctx, client.ObjectKey{Namespace: t.config.Namespace, Name: name}, devbox); err != nil {
-		return fmt.Errorf("获取 Devbox 失败: %w", err)
+		return fmt.Errorf("get Devbox failed: %w", err)
 	}
 	devbox.Spec.State = devboxv1alpha2.DevboxStateRunning
 	if err := t.ctrlClient.Update(ctx, devbox); err != nil {
-		return fmt.Errorf("恢复状态失败: %w", err)
+		return fmt.Errorf("restore state failed: %w", err)
 	}
 
-	// 等待恢复运行
+	// wait for restore running
 	if err := t.waitForDevboxRunning(ctx, name, 5*time.Minute); err != nil {
-		return fmt.Errorf("等待 Devbox 恢复运行超时: %w", err)
+		return fmt.Errorf("wait for restore running timeout: %w", err)
 	}
 
-	// 验证第一批数据
+	// verify first batch of data
 	if t.config.VerifyData {
-		log.Printf("[%s] 验证第一批数据", name)
+		log.Printf("[%s] verify first batch of data", name)
 		if err := t.ctrlClient.Get(ctx, client.ObjectKey{Namespace: t.config.Namespace, Name: name}, devbox); err != nil {
-			return fmt.Errorf("获取 Devbox 失败: %w", err)
+			return fmt.Errorf("get Devbox failed: %w", err)
 		}
 		if err := t.verifyDataInDirectory(ctx, *devbox, "test_data_phase1"); err != nil {
-			return fmt.Errorf("数据验证失败: %w", err)
+			return fmt.Errorf("verify data failed: %w", err)
 		}
 	}
 
 	return nil
 }
 
-// phase3_ShutdownCommitAndVerify 阶段3: Shutdown Commit 测试
+// phase3_ShutdownCommitAndVerify phase3: Shutdown Commit test
 func (t *DevboxLifecycleTester) phase3_ShutdownCommitAndVerify(ctx context.Context, name string) error {
-	// 获取 Devbox
+	// get Devbox
 	devbox := &devboxv1alpha2.Devbox{}
 	if err := t.ctrlClient.Get(ctx, client.ObjectKey{Namespace: t.config.Namespace, Name: name}, devbox); err != nil {
-		return fmt.Errorf("获取 Devbox 失败: %w", err)
+		return fmt.Errorf("get Devbox failed: %w", err)
 	}
 
-	// 写入第二批测试数据
-	log.Printf("[%s] 写入第二批测试数据 (目录: test_data_phase2)", name)
+	// write second batch of test data
+	log.Printf("[%s] write second batch of test data (directory: test_data_phase2)", name)
 	if err := t.writeDataToDirectory(ctx, *devbox, "test_data_phase2", t.config.Data2Size, t.config.FileCount); err != nil {
-		return fmt.Errorf("写入数据失败: %w", err)
+		return fmt.Errorf("write data failed: %w", err)
 	}
 
-	// 强制同步文件系统，确保数据写入磁盘（非常重要！）
-	log.Printf("[%s] 同步文件系统，确保数据持久化到 LVM", name)
+	// force sync file system, ensure data written to disk (very important!)
+	log.Printf("[%s] sync file system, ensure data persisted to LVM", name)
 	syncCmd := []string{"sync"}
 	if err := t.execCommandInPod(ctx, devbox.Namespace, devbox.Name, devbox.Name, syncCmd); err != nil {
-		log.Printf("[%s] ⚠ 同步文件系统失败: %v (继续执行)", name, err)
+		log.Printf("[%s] ⚠ sync file system failed: %v (continue execution)", name, err)
 	}
-	// 等待一小段时间，确保同步完成并让 I/O 缓冲区刷新
+	// wait for a short period, ensure sync completed and flush I/O buffer
 	time.Sleep(3 * time.Second)
 
-	// 修改状态为 Shutdown 触发 commit
-	log.Printf("[%s] 修改状态为 Shutdown 触发 commit", name)
+	// modify state to Shutdown to trigger commit
+	log.Printf("[%s] modify state to Shutdown to trigger commit", name)
 	devbox.Spec.State = devboxv1alpha2.DevboxStateShutdown
 	if err := t.ctrlClient.Update(ctx, devbox); err != nil {
-		return fmt.Errorf("修改状态失败: %w", err)
+		return fmt.Errorf("modify state failed: %w", err)
 	}
 
-	// 等待 commit 完成
+	// wait for commit complete
 	if err := t.waitForCommitComplete(ctx, name, devboxv1alpha2.DevboxStateShutdown, 10*time.Minute); err != nil {
-		return fmt.Errorf("等待 commit 完成超时: %w", err)
+		return fmt.Errorf("wait for commit complete timeout: %w", err)
 	}
 
-	// 恢复 Running 状态
-	log.Printf("[%s] 恢复 Running 状态", name)
+	// restore Running state
+	log.Printf("[%s] restore Running state", name)
 	if err := t.ctrlClient.Get(ctx, client.ObjectKey{Namespace: t.config.Namespace, Name: name}, devbox); err != nil {
-		return fmt.Errorf("获取 Devbox 失败: %w", err)
+		return fmt.Errorf("get Devbox failed: %w", err)
 	}
 	devbox.Spec.State = devboxv1alpha2.DevboxStateRunning
 	if err := t.ctrlClient.Update(ctx, devbox); err != nil {
-		return fmt.Errorf("恢复状态失败: %w", err)
+		return fmt.Errorf("restore state failed: %w", err)
 	}
 
-	// 等待恢复运行
+	// wait for restore running
 	if err := t.waitForDevboxRunning(ctx, name, 5*time.Minute); err != nil {
-		return fmt.Errorf("等待 Devbox 恢复运行超时: %w", err)
+		return fmt.Errorf("wait for restore running timeout: %w", err)
 	}
 
-	// 验证两批数据都存在
+	// verify both batches of data exist
 	if t.config.VerifyData {
-		log.Printf("[%s] 验证两批数据", name)
+		log.Printf("[%s] verify both batches of data", name)
 		if err := t.ctrlClient.Get(ctx, client.ObjectKey{Namespace: t.config.Namespace, Name: name}, devbox); err != nil {
-			return fmt.Errorf("获取 Devbox 失败: %w", err)
+			return fmt.Errorf("get Devbox failed: %w", err)
 		}
 		if err := t.verifyDataInDirectory(ctx, *devbox, "test_data_phase1"); err != nil {
-			return fmt.Errorf("第一批数据验证失败: %w", err)
+			return fmt.Errorf("first batch of data verify failed: %w", err)
 		}
 		if err := t.verifyDataInDirectory(ctx, *devbox, "test_data_phase2"); err != nil {
-			return fmt.Errorf("第二批数据验证失败: %w", err)
+			return fmt.Errorf("second batch of data verify failed: %w", err)
 		}
 	}
 
 	return nil
 }
 
-// phasePreRelease_StopDevbox 阶段3.5: 停止 Devbox 准备发版
+// phasePreRelease_StopDevbox phase3.5: stop Devbox before release
 func (t *DevboxLifecycleTester) phasePreRelease_StopDevbox(ctx context.Context, name string) error {
-	// 获取 Devbox
+	// get Devbox
 	devbox := &devboxv1alpha2.Devbox{}
 	if err := t.ctrlClient.Get(ctx, client.ObjectKey{Namespace: t.config.Namespace, Name: name}, devbox); err != nil {
-		return fmt.Errorf("获取 Devbox 失败: %w", err)
+		return fmt.Errorf("get Devbox failed: %w", err)
 	}
 
-	// 修改状态为 Stopped（发版要求）
-	log.Printf("[%s] 将 Devbox 状态设置为 Stopped（发版前要求）", name)
+	// modify state to Stopped (required before release)
+	log.Printf("[%s] modify state to Stopped (required before release)", name)
 	devbox.Spec.State = devboxv1alpha2.DevboxStateStopped
 	if err := t.ctrlClient.Update(ctx, devbox); err != nil {
-		return fmt.Errorf("修改状态失败: %w", err)
+		return fmt.Errorf("modify state failed: %w", err)
 	}
 
-	// 等待状态变更完成
+	// wait for state change complete
 	if err := t.waitForDevboxState(ctx, name, devboxv1alpha2.DevboxStateStopped, 5*time.Minute); err != nil {
-		return fmt.Errorf("等待 Devbox 停止超时: %w", err)
+		return fmt.Errorf("wait for Devbox stop timeout: %w", err)
 	}
 
-	log.Printf("[%s] Devbox 已成功停止，可以进行发版", name)
+	log.Printf("[%s] Devbox stopped successfully, can proceed with release", name)
 	return nil
 }
 
-// phase4_ReleaseAndVerify 阶段4: 发版测试
+// phase4_ReleaseAndVerify phase4: release test
 func (t *DevboxLifecycleTester) phase4_ReleaseAndVerify(ctx context.Context, name string) error {
 	releaseName := fmt.Sprintf("%s-release", name)
 	version := fmt.Sprintf(t.config.ReleaseVersionPattern, 1)
 
-	// 创建 DevBoxRelease
+	// create DevBoxRelease
 	release := &devboxv1alpha2.DevBoxRelease{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      releaseName,
@@ -478,157 +478,157 @@ func (t *DevboxLifecycleTester) phase4_ReleaseAndVerify(ctx context.Context, nam
 		},
 	}
 
-	log.Printf("[%s] 创建 DevBoxRelease: %s (版本: %s)", name, releaseName, version)
+	log.Printf("[%s] create DevBoxRelease: %s (version: %s)", name, releaseName, version)
 	if err := t.ctrlClient.Create(ctx, release); err != nil {
-		return fmt.Errorf("创建 DevBoxRelease 失败: %w", err)
+		return fmt.Errorf("create DevBoxRelease failed: %w", err)
 	}
 
 	// 等待发版完成
 	phase, err := t.waitForReleaseComplete(ctx, releaseName, 5*time.Minute)
 	if err != nil {
-		return fmt.Errorf("等待发版完成超时: %w", err)
+		return fmt.Errorf("wait for release complete timeout: %w", err)
 	}
 
 	if phase != devboxv1alpha2.DevBoxReleasePhaseSuccess {
-		return fmt.Errorf("发版失败，状态: %s", phase)
+		return fmt.Errorf("release failed, phase: %s", phase)
 	}
 
-	log.Printf("[%s] 发版成功: %s", name, releaseName)
+	log.Printf("[%s] release successful: %s", name, releaseName)
 	return nil
 }
 
-// waitForDevboxRunning 等待 Devbox 运行就绪
+// waitForDevboxRunning wait for Devbox running ready
 func (t *DevboxLifecycleTester) waitForDevboxRunning(ctx context.Context, name string, timeout time.Duration) error {
 	_, err := t.helper.WaitForDevboxRunningWithResources(ctx, t.config.Namespace, name, timeout)
 	return err
 }
 
-// waitForDevboxState 等待 Devbox 达到指定状态
+// waitForDevboxState wait for Devbox reach specified state
 func (t *DevboxLifecycleTester) waitForDevboxState(ctx context.Context, name string, targetState devboxv1alpha2.DevboxState, timeout time.Duration) error {
 	return t.helper.WaitForDevboxState(ctx, t.config.Namespace, name, targetState, timeout)
 }
 
-// waitForCommitComplete 等待 commit 完成
+// waitForCommitComplete wait for commit complete
 func (t *DevboxLifecycleTester) waitForCommitComplete(ctx context.Context, name string, targetState devboxv1alpha2.DevboxState, timeout time.Duration) error {
 	return t.helper.WaitForCommitComplete(ctx, t.config.Namespace, name, targetState, timeout)
 }
 
-// waitForReleaseComplete 等待发版完成
+// waitForReleaseComplete wait for release complete
 func (t *DevboxLifecycleTester) waitForReleaseComplete(ctx context.Context, name string, timeout time.Duration) (devboxv1alpha2.DevBoxReleasePhase, error) {
 	return t.helper.WaitForReleaseComplete(ctx, t.config.Namespace, name, timeout)
 }
 
-// verifyAllResources 验证所有资源是否创建
+// verifyAllResources verify all resources are created
 func (t *DevboxLifecycleTester) verifyAllResources(ctx context.Context, name string) error {
 	devbox := &devboxv1alpha2.Devbox{}
 	if err := t.ctrlClient.Get(ctx, client.ObjectKey{Namespace: t.config.Namespace, Name: name}, devbox); err != nil {
-		return fmt.Errorf("获取 Devbox 失败: %w", err)
+		return fmt.Errorf("get Devbox failed: %w", err)
 	}
 
-	// 检查 Secret
+	// check Secret
 	if !t.isSecretCreated(ctx, *devbox) {
-		return fmt.Errorf("Secret 未创建")
+		return fmt.Errorf("Secret not created")
 	}
-	log.Printf("[%s] ✓ Secret 已创建", name)
+	log.Printf("[%s] ✓ Secret created", name)
 
-	// 检查 Service
+	// check Service
 	if !t.isServiceCreated(ctx, *devbox) {
-		return fmt.Errorf("Service 未创建")
+		return fmt.Errorf("Service not created")
 	}
-	log.Printf("[%s] ✓ Service 已创建", name)
+	log.Printf("[%s] ✓ Service created", name)
 
-	// 检查 Pod
+	// check Pod
 	if !t.isPodRunning(ctx, *devbox) {
-		return fmt.Errorf("Pod 未运行")
+		return fmt.Errorf("Pod not running")
 	}
-	log.Printf("[%s] ✓ Pod 正在运行", name)
+	log.Printf("[%s] ✓ Pod running", name)
 
-	// 检查 LV
+	// check LVM
 	if !t.isLVMCreated(ctx, *devbox) {
-		log.Printf("[%s] ⚠ LVM 逻辑卷未找到（可能正常）", name)
+		log.Printf("[%s] ⚠ LVM not found (may be normal)", name)
 	} else {
-		log.Printf("[%s] ✓ LVM 逻辑卷已创建", name)
+		log.Printf("[%s] ✓ LVM created", name)
 	}
 
 	return nil
 }
 
-// writeDataToDirectory 向指定目录写入测试数据
+// writeDataToDirectory write test data to specified directory
 func (t *DevboxLifecycleTester) writeDataToDirectory(ctx context.Context, devbox devboxv1alpha2.Devbox, directory string, dataSize string, fileCount int) error {
 	return t.helper.WriteTestDataToDevbox(ctx, devbox, directory, dataSize, fileCount)
 }
 
-// verifyDataInDirectory 验证指定目录的数据
+// verifyDataInDirectory verify data in specified directory
 func (t *DevboxLifecycleTester) verifyDataInDirectory(ctx context.Context, devbox devboxv1alpha2.Devbox, directory string) error {
 	return t.helper.VerifyTestDataInDevbox(ctx, devbox, directory)
 }
 
-// execCommandInPod 在 Pod 中执行命令
+// execCommandInPod execute command in Pod
 func (t *DevboxLifecycleTester) execCommandInPod(ctx context.Context, namespace, podName, containerName string, cmd []string) error {
 	return t.helper.ExecCommandInPod(ctx, namespace, podName, containerName, cmd)
 }
 
-// isPodRunning 检查 Pod 是否运行
+// isPodRunning check if Pod is running
 func (t *DevboxLifecycleTester) isPodRunning(ctx context.Context, devbox devboxv1alpha2.Devbox) bool {
 	return t.helper.IsPodRunning(ctx, devbox)
 }
 
-// isServiceCreated 检查 Service 是否创建
+// isServiceCreated check if Service is created
 func (t *DevboxLifecycleTester) isServiceCreated(ctx context.Context, devbox devboxv1alpha2.Devbox) bool {
 	return t.helper.IsServiceCreated(ctx, devbox)
 }
 
-// isSecretCreated 检查 Secret 是否创建
+// isSecretCreated check if Secret is created
 func (t *DevboxLifecycleTester) isSecretCreated(ctx context.Context, devbox devboxv1alpha2.Devbox) bool {
 	return t.helper.IsSecretCreated(ctx, devbox)
 }
 
-// isLVMCreated 检查 LVM 逻辑卷是否创建
+// isLVMCreated check if LVM logical volume is created
 func (t *DevboxLifecycleTester) isLVMCreated(ctx context.Context, devbox devboxv1alpha2.Devbox) bool {
 	return t.helper.IsLVMCreated(ctx, devbox)
 }
 
 // Cleanup cleans up test resources
 func (t *DevboxLifecycleTester) Cleanup(ctx context.Context) error {
-	log.Printf("开始清理生命周期测试资源...")
+	log.Printf("start cleaning up lifecycle test resources...")
 
-	// 删除所有 DevBoxRelease
+	// delete all DevBoxRelease
 	releaseList := &devboxv1alpha2.DevBoxReleaseList{}
 	if err := t.ctrlClient.List(ctx, releaseList, client.InNamespace(t.config.Namespace)); err != nil {
-		log.Printf("列出 DevBoxRelease 失败: %v", err)
+		log.Printf("list DevBoxRelease failed: %v", err)
 	} else {
 		for _, release := range releaseList.Items {
 			if t.isLifecycleTestRelease(release) {
 				if err := t.ctrlClient.Delete(ctx, &release); err != nil {
-					log.Printf("删除 DevBoxRelease %s 失败: %v", release.Name, err)
+					log.Printf("delete DevBoxRelease %s failed: %v", release.Name, err)
 				} else {
-					log.Printf("已删除 DevBoxRelease: %s", release.Name)
+					log.Printf("DevBoxRelease deleted: %s", release.Name)
 				}
 			}
 		}
 	}
 
-	// 删除所有 Devbox
+	// delete all Devbox
 	devboxList := &devboxv1alpha2.DevboxList{}
 	if err := t.ctrlClient.List(ctx, devboxList, client.InNamespace(t.config.Namespace)); err != nil {
-		log.Printf("列出 Devbox 失败: %v", err)
+		log.Printf("list Devbox failed: %v", err)
 	} else {
 		for _, devbox := range devboxList.Items {
 			if t.isLifecycleTestDevbox(devbox) {
 				if err := t.ctrlClient.Delete(ctx, &devbox); err != nil {
-					log.Printf("删除 Devbox %s 失败: %v", devbox.Name, err)
+					log.Printf("delete Devbox %s failed: %v", devbox.Name, err)
 				} else {
-					log.Printf("已删除 Devbox: %s", devbox.Name)
+					log.Printf("Devbox deleted: %s", devbox.Name)
 				}
 			}
 		}
 	}
 
-	log.Printf("清理完成")
+	log.Printf("cleanup completed")
 	return nil
 }
 
-// isLifecycleTestRelease 判断是否为生命周期测试的 Release
+// isLifecycleTestRelease check if it is a lifecycle test Release
 func (t *DevboxLifecycleTester) isLifecycleTestRelease(release devboxv1alpha2.DevBoxRelease) bool {
 	if release.Labels != nil {
 		if testType, ok := release.Labels["test-type"]; ok && testType == "lifecycle" {
@@ -638,7 +638,7 @@ func (t *DevboxLifecycleTester) isLifecycleTestRelease(release devboxv1alpha2.De
 	return strings.Contains(release.Name, "lifecycle-test-")
 }
 
-// isLifecycleTestDevbox 判断是否为生命周期测试的 Devbox
+// isLifecycleTestDevbox check if it is a lifecycle test Devbox
 func (t *DevboxLifecycleTester) isLifecycleTestDevbox(devbox devboxv1alpha2.Devbox) bool {
 	if devbox.Labels != nil {
 		if testType, ok := devbox.Labels["test-type"]; ok && testType == "lifecycle" {

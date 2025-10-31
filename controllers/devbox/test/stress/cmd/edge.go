@@ -94,39 +94,39 @@ func init() {
 	edgeCmd.AddCommand(unexpectedDeleteCmd)
 	edgeCmd.AddCommand(crashCmd)
 
-	// 基础配置
+	// base config
 	toggleCmd.Flags().StringVarP(&edgeNamespace, "namespace", "n", "devbox-test", "namespace")
-	toggleCmd.Flags().StringVar(&edgeImage, "image", "ghcr.io/labring-actions/devbox/go-1.23.0:13aacd8", "Devbox 镜像")
+	toggleCmd.Flags().StringVar(&edgeImage, "image", "ghcr.io/labring-actions/devbox/go-1.23.0:13aacd8", "Devbox image")
 	toggleCmd.Flags().StringVar(&edgeCPU, "cpu", "2000m", "CPU resource")
 	toggleCmd.Flags().StringVar(&edgeMemory, "memory", "4096Mi", "memory resource")
 	toggleCmd.Flags().StringVar(&edgeStorage, "storage", "10Gi", "storage limit")
 
-	// 测试规模
+	// test scale
 	toggleCmd.Flags().IntVarP(&toggleCount, "count", "c", 1, "number of devboxes to test")
 	toggleCmd.Flags().IntVar(&toggleConcurrent, "concurrent", 1, "number of concurrent tests (1 means sequential tests)")
 
-	// 切换配置
+	// toggle config
 	toggleCmd.Flags().IntVar(&toggleCycles, "cycles", 5, "number of toggle cycles")
 	toggleCmd.Flags().DurationVar(&toggleWait, "wait", 5*time.Second, "wait time after each state toggle")
 	toggleCmd.Flags().StringVar(&toggleMode, "mode", "shutdown", "toggle mode: stopped or shutdown")
 
-	// 数据配置
+	// data config
 	toggleCmd.Flags().StringVar(&toggleDataSize, "data-size", "100M", "test data size (e.g. 100M)")
 	toggleCmd.Flags().IntVar(&toggleFileCount, "file-count", 5, "number of test files")
 
-	// 超时配置
+	// timeout config
 	toggleCmd.Flags().DurationVar(&toggleStateTimeout, "state-timeout", 5*time.Minute, "state toggle timeout")
-	toggleCmd.Flags().DurationVar(&toggleTestTimeout, "test-timeout", 30*time.Minute, "total test timeout")
+	toggleCmd.Flags().DurationVar(&toggleTestTimeout, "test-timeout", 60*time.Minute, "total test timeout")
 
-	// 其他选项
+	// other options
 	toggleCmd.Flags().BoolVar(&toggleCleanup, "cleanup", false, "clean up resources after test")
-	toggleCmd.Flags().BoolVarP(&toggleVerbose, "verbose", "v", true, "display detailed output")
+	toggleCmd.Flags().BoolVarP(&toggleVerbose, "verbose", "v", false, "display detailed output")
 }
 
 func runToggleTest(cmd *cobra.Command, args []string) {
 	ctx := context.Background()
 
-	// 验证切换模式
+	// validate toggle mode
 	var stateMode edge.StateToggleMode
 	switch toggleMode {
 	case "stopped":
