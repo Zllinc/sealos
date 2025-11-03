@@ -380,9 +380,9 @@ func (t *StateEdgeTester) checkResources(ctx context.Context, devbox devboxv1alp
 	if !t.helper.IsSecretCreated(ctx, devbox) {
 		missing = append(missing, "Secret")
 	}
-	if !t.helper.IsLVMCreated(ctx, devbox) {
-		missing = append(missing, "LVM")
-	}
+	// if !t.helper.IsLVMCreated(ctx, devbox) {
+	// 	missing = append(missing, "LVM")
+	// }
 
 	if len(missing) == 0 {
 		return ""

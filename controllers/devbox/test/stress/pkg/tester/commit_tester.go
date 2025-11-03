@@ -237,7 +237,9 @@ func (t *DevboxCommitTester) testSingleDevboxFullLifecycle(ctx context.Context, 
 	if err := t.helper.ExecCommandInPod(ctx, devbox.Namespace, devbox.Name, devbox.Name, syncCmd); err != nil {
 		log.Printf("[%d/%d] ⚠ 同步文件系统失败: %s - %v (继续执行)", index, total, devbox.Name, err)
 	}
-	time.Sleep(3 * time.Second)
+	// wait longer for LVM Thin Pool metadata to flush (critical for data integrity)
+	log.Printf("[%d/%d] waiting 10 seconds for LVM metadata flush: %s", index, total, devbox.Name)
+	time.Sleep(10 * time.Second)
 
 	// 阶段 3: 触发 Commit
 	log.Printf("[%d/%d] 触发 Commit (状态: %s): %s", index, total, t.config.TargetState, devbox.Name)

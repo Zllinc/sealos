@@ -320,8 +320,9 @@ func (t *DevboxLifecycleTester) phase2_StoppedCommitAndVerify(ctx context.Contex
 	if err := t.execCommandInPod(ctx, devbox.Namespace, devbox.Name, devbox.Name, syncCmd); err != nil {
 		log.Printf("[%s] ⚠ sync file system failed: %v (continue execution)", name, err)
 	}
-	// wait for a short period, ensure sync completed
-	time.Sleep(3 * time.Second)
+	// wait longer for LVM Thin Pool metadata to flush (critical for data integrity)
+	log.Printf("[%s] waiting 10 seconds for LVM metadata flush...", name)
+	time.Sleep(10 * time.Second)
 
 	// modify state to Stopped to trigger commit
 	log.Printf("[%s] modify state to Stopped to trigger commit", name)
@@ -384,8 +385,9 @@ func (t *DevboxLifecycleTester) phase3_ShutdownCommitAndVerify(ctx context.Conte
 	if err := t.execCommandInPod(ctx, devbox.Namespace, devbox.Name, devbox.Name, syncCmd); err != nil {
 		log.Printf("[%s] ⚠ sync file system failed: %v (continue execution)", name, err)
 	}
-	// wait for a short period, ensure sync completed and flush I/O buffer
-	time.Sleep(3 * time.Second)
+	// wait longer for LVM Thin Pool metadata to flush (critical for data integrity)
+	log.Printf("[%s] waiting 10 seconds for LVM metadata flush...", name)
+	time.Sleep(10 * time.Second)
 
 	// modify state to Shutdown to trigger commit
 	log.Printf("[%s] modify state to Shutdown to trigger commit", name)
