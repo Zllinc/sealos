@@ -74,6 +74,31 @@ func (h *DevboxCommonHelper) GenerateDevbox(spec DevboxCreateSpec) *devboxv1alph
 			NetworkSpec: devboxv1alpha2.NetworkSpec{
 				Type: devboxv1alpha2.NetworkTypeNodePort,
 			},
+			// add Tolerations, allow scheduling to nodes with devbox.sealos.io/node taint
+			Tolerations: []corev1.Toleration{
+				{
+					Key:      "devbox.sealos.io/node",
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			// add Affinity, force scheduling to nodes with devbox.sealos.io/node label
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{
+										Key:      "devbox.sealos.io/node",
+										Operator: corev1.NodeSelectorOpExists,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 }
