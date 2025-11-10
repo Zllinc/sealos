@@ -49,7 +49,7 @@ func TestCommitFlow(t *testing.T) {
 // test create container
 func TestCreateContainer(t *testing.T) {
 	ctx := context.Background()
-	committer, err := NewCommitter("", "", "", true)
+	committer, err := NewCommitter("sealos.hub:5000", "admin", "5e79497edb8bafb9", false)
 	assert.NoError(t, err)
 
 	// create container

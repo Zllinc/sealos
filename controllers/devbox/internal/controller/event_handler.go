@@ -314,7 +314,7 @@ func (h *EventHandler) cleanupStorage(ctx context.Context, devboxName, contentID
 	h.Logger.Info("Starting Storage cleanup", "devbox", devboxName, "contentID", contentID, "baseImage", baseImage, "defaultBaseImage", h.DefaultBaseImage)
 
 	// create temp container
-	containerID, err := h.Committer.CreateContainer(ctx, fmt.Sprintf("temp-%s-%d", devboxName, time.Now().UnixMicro()), contentID, h.DefaultBaseImage)
+	containerID, err := h.Committer.CreateContainerNative(ctx, fmt.Sprintf("temp-%s-%d", devboxName, time.Now().UnixMicro()), contentID, h.DefaultBaseImage)
 	if err != nil {
 		h.Logger.Error(err, "failed to create temp container", "devbox", devboxName, "contentID", contentID, "defaultBaseImage", h.DefaultBaseImage)
 		return err
