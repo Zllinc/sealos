@@ -116,7 +116,7 @@ func init() {
 
 	// timeout config
 	toggleCmd.Flags().DurationVar(&toggleStateTimeout, "state-timeout", 5*time.Minute, "state toggle timeout")
-	toggleCmd.Flags().DurationVar(&toggleTestTimeout, "test-timeout", 60*time.Minute, "total test timeout")
+	toggleCmd.Flags().DurationVar(&toggleTestTimeout, "test-timeout", 3600*time.Minute, "total test timeout")
 
 	// other options
 	toggleCmd.Flags().BoolVar(&toggleCleanup, "cleanup", false, "clean up resources after test")

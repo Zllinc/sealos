@@ -248,6 +248,15 @@ func (t *StateEdgeTester) testSingleDevboxToggle(ctx context.Context, name strin
 		}
 		log.Printf("[%s] loop %d/%d: confirmed %s state", name, cycle+1, t.config.ToggleCycles, targetState)
 
+		// 4.3: remove base image from local node
+		log.Printf("[%s] loop %d/%d: 删除基础镜像", name, cycle+1, t.config.ToggleCycles)
+		if err := t.helper.RemoveCurrentBaseImage(ctx, t.config.Namespace, name); err != nil {
+			detail.Error = fmt.Sprintf("删除镜像失败: %v, cycle: %d", err, cycle+1)
+			detail.ToggleCycles = cycle
+			detail.TotalDuration = time.Since(startTime)
+			return detail
+		}
+
 		// 4.3: extra wait (optional, for stability test)
 		if t.config.WaitAfterState > 0 {
 			time.Sleep(t.config.WaitAfterState)

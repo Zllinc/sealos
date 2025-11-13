@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -531,4 +532,57 @@ func isNetworkError(err error) bool {
 	}
 
 	return false
+}
+
+// ==================== Image Management Methods ====================
+
+// RemoveCurrentBaseImage removes the current base image of the Devbox from the local node
+func (h *DevboxCommonHelper) RemoveCurrentBaseImage(ctx context.Context, namespace, name string) error {
+	devbox := &devboxv1alpha2.Devbox{}
+	if err := h.ctrlClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, devbox); err != nil {
+		return fmt.Errorf("获取 devbox 失败: %w", err)
+	}
+
+	contentID := devbox.Status.ContentID
+	if contentID == "" {
+		return fmt.Errorf("devbox %s 未找到 contentID", name)
+	}
+
+	if devbox.Status.CommitRecords == nil {
+		return fmt.Errorf("devbox %s 的 commitRecords 为空", name)
+	}
+
+	record, ok := devbox.Status.CommitRecords[contentID]
+	if !ok || record == nil {
+		return fmt.Errorf("devbox %s 未找到 contentID %s 对应的记录", name, contentID)
+	}
+
+	baseImage := record.BaseImage
+	if baseImage == "" {
+		return fmt.Errorf("devbox %s 的基础镜像为空", name)
+	}
+
+	log.Printf("准备删除镜像: %s", baseImage)
+
+	cmd := exec.CommandContext(ctx, "ctr", "-n", "k8s.io", "images", "rm", baseImage)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		errMsg := stderr.String()
+		if errMsg != "" {
+			return fmt.Errorf("删除镜像失败: %w, stderr: %s", err, errMsg)
+		}
+		return fmt.Errorf("删除镜像失败: %w", err)
+	}
+
+	if out := stdout.String(); out != "" {
+		log.Printf("ctr 输出: %s", out)
+	}
+
+	log.Printf("镜像删除成功: %s，等待 6 秒确保清理完成", baseImage)
+	time.Sleep(6 * time.Second)
+	return nil
 }
