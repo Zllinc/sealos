@@ -165,8 +165,9 @@ func (c *CommitterImpl) CreateContainerNative(
 		AnnotationKeyImageName:          baseImage,
 	}
 
-	// Add merge base image layers annotation if enabled
-	annotations[v1alpha2.AnnotationInit] = "false"
+	if c.mergeBaseImageTopLayer {
+		annotations[v1alpha2.AnnotationInit] = AnnotationImageFromValue
+	}
 
 	// prepare snapshot labels
 	snapshotLabels := convertLabels(annotations)
@@ -253,6 +254,45 @@ func (c *CommitterImpl) CreateContainerNative(
 
 	log.Printf("Container created successfully: %s (ID: %s)", containerName, container.ID())
 	return container.ID(), nil
+}
+
+func (c *CommitterImpl) CommitNative(ctx context.Context, devboxName string, contentID string, baseImage string, commitImage string) (string, error) {
+	fmt.Println("========>>>> commit devbox", devboxName, contentID, baseImage, commitImage)
+	ctx = namespaces.WithNamespace(ctx, DefaultNamespace)
+
+	// create container
+	containerID, err := c.CreateContainerNative(ctx, devboxName, contentID, baseImage)
+	if err != nil {
+		return "", fmt.Errorf("failed to create container: %v", err)
+	}
+
+	// get container
+	container,err:=c.containerdClient.LoadContainer(ctx, containerID)
+	if err!=nil{
+		return "", fmt.Errorf("failed to load container: %v", err)
+	}
+
+	// get container info
+	info, err := container.Info(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get container info: %v", err)
+	}
+
+	// get base image
+	baseImg,err:=c.containerdClient.GetImage(ctx, baseImage)
+	if err!=nil{
+		return "", fmt.Errorf("failed to get base image: %v", err)
+	}
+
+	// get base image config
+	baseImgConfig,err:=c.readImageConfig(ctx, baseImg)
+	if err!=nil{
+		return "", fmt.Errorf("failed to get base image config: %v", err)
+	}
+
+	
+	
+	return containerID,nil
 }
 
 // CreateContainer create container with labels
