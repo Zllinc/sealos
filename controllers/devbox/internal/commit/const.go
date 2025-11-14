@@ -1,6 +1,10 @@
 package commit
 
-import "time"
+import (
+	"time"
+
+	"github.com/opencontainers/go-digest"
+)
 
 const (
 	DefaultNamespace           = "sealos.io"
@@ -26,4 +30,6 @@ const (
 	DefaultMaxRetries = 3
 	DefaultRetryDelay = 5 * time.Second
 	DefaultGcInterval = 20 * time.Minute
+
+	EmptyDigest  = digest.Digest("")
 )

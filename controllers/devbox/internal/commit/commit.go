@@ -278,16 +278,13 @@ func (c *CommitterImpl) CommitNative(ctx context.Context, devboxName string, con
 		return "", fmt.Errorf("failed to get container info: %v", err)
 	}
 
-	// get base image
-	baseImg,err:=c.containerdClient.GetImage(ctx, baseImage)
-	if err!=nil{
-		return "", fmt.Errorf("failed to get base image: %v", err)
-	}
+	// container id 
+	id:=container.ID()
 
 	// get base image config
-	baseImgConfig,err:=c.readImageConfig(ctx, baseImg)
-	if err!=nil{
-		return "", fmt.Errorf("failed to get base image config: %v", err)
+	baseImgWithoutPlatform, err := c.containerdClient.ImageService().Get(ctx, info.Image)
+	if err != nil {
+		return EmptyDigest, fmt.Errorf("container %q lacks image (wasn't created by nerdctl?): %w", id, err)
 	}
 
 	
