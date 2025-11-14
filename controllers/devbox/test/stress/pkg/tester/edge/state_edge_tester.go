@@ -291,43 +291,43 @@ func (t *StateEdgeTester) testSingleDevboxToggle(ctx context.Context, name strin
 		log.Printf("[%s] loop %d/%d completed, duration: %v", name, cycle+1, t.config.ToggleCycles, cycleDuration)
 	}
 
-	detail.ToggleCycles = t.config.ToggleCycles
-	log.Printf("[%s] all toggle loops completed", name)
+		detail.ToggleCycles = t.config.ToggleCycles
+		log.Printf("[%s] all toggle loops completed", name)
 
-	// step 5: wait for last Running ready
-	log.Printf("[%s] step 5: wait for devbox completely ready", name)
-	devbox, err = t.helper.WaitForDevboxRunningWithResources(ctx, t.config.Namespace, name, 5*time.Minute)
-	if err != nil {
-		detail.Error = fmt.Sprintf("wait for last Running timeout: %v", err)
+		// step 5: wait for last Running ready
+		log.Printf("[%s] step 5: wait for devbox completely ready", name)
+		devbox, err = t.helper.WaitForDevboxRunningWithResources(ctx, t.config.Namespace, name, 5*time.Minute)
+		if err != nil {
+			detail.Error = fmt.Sprintf("wait for last Running timeout: %v", err)
+			detail.TotalDuration = time.Since(startTime)
+			return detail
+		}
+
+		// step 6: verify data integrity
+		log.Printf("[%s] step 6: verify data integrity", name)
+		if err := t.helper.VerifyTestDataInDevbox(ctx, *devbox, dataDir); err != nil {
+			detail.Error = fmt.Sprintf("data verification failed: %v", err)
+			detail.DataVerifySuccess = false
+			detail.TotalDuration = time.Since(startTime)
+			return detail
+		}
+		detail.DataVerifySuccess = true
+		log.Printf("[%s] data verification successful", name)
+
+		// step 7: check resources
+		log.Printf("[%s] step 7: check resources", name)
+		missing := t.checkResources(ctx, *devbox)
+		if len(missing) > 0 {
+			detail.Error = fmt.Sprintf("resources check failed: missing %s", missing)
+			detail.MissingResources = missing
+			detail.ResourceCheckOK = false
+		} else {
+			detail.ResourceCheckOK = true
+			log.Printf("[%s] resources check successful", name)
+		}
+
 		detail.TotalDuration = time.Since(startTime)
-		return detail
-	}
-
-	// step 6: verify data integrity
-	log.Printf("[%s] step 6: verify data integrity", name)
-	if err := t.helper.VerifyTestDataInDevbox(ctx, *devbox, dataDir); err != nil {
-		detail.Error = fmt.Sprintf("data verification failed: %v", err)
-		detail.DataVerifySuccess = false
-		detail.TotalDuration = time.Since(startTime)
-		return detail
-	}
-	detail.DataVerifySuccess = true
-	log.Printf("[%s] data verification successful", name)
-
-	// step 7: check resources
-	log.Printf("[%s] step 7: check resources", name)
-	missing := t.checkResources(ctx, *devbox)
-	if len(missing) > 0 {
-		detail.Error = fmt.Sprintf("resources check failed: missing %s", missing)
-		detail.MissingResources = missing
-		detail.ResourceCheckOK = false
-	} else {
-		detail.ResourceCheckOK = true
-		log.Printf("[%s] resources check successful", name)
-	}
-
-	detail.TotalDuration = time.Since(startTime)
-	log.Printf("[%s] test completed, total duration: %v", name, detail.TotalDuration)
+		log.Printf("[%s] test completed, total duration: %v", name, detail.TotalDuration)
 
 	return detail
 }

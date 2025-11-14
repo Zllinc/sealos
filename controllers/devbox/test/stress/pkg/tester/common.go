@@ -557,14 +557,48 @@ func (h *DevboxCommonHelper) RemoveCurrentBaseImage(ctx context.Context, namespa
 		return fmt.Errorf("devbox %s 未找到 contentID %s 对应的记录", name, contentID)
 	}
 
-	baseImage := record.BaseImage
-	if baseImage == "" {
+	currentBaseImage := record.BaseImage
+	if currentBaseImage == "" {
 		return fmt.Errorf("devbox %s 的基础镜像为空", name)
 	}
 
-	log.Printf("准备删除镜像: %s", baseImage)
+	// 当前周期的 baseImage == 上一次 CommitImage，需要根据该 CommitImage 找到更早一层的 baseImage
+	var imageToRemove string
+	for _, rec := range devbox.Status.CommitRecords {
+		if rec == nil || rec.CommitImage == "" {
+			continue
+		}
+		if rec.CommitImage == currentBaseImage {
+			imageToRemove = rec.BaseImage
+			break
+		}
+	}
 
-	cmd := exec.CommandContext(ctx, "ctr", "-n", "k8s.io", "images", "rm", baseImage)
+	if imageToRemove == "" {
+		log.Printf("未找到匹配当前基础镜像 %s 的上一层记录，跳过删除", currentBaseImage)
+		return nil
+	}
+
+	log.Printf("准备删除上一轮基础镜像: %s (当前基础镜像: %s)", imageToRemove, currentBaseImage)
+	namespaces := []string{"k8s.io", "sealos.io"}
+	for _, ns := range namespaces {
+		log.Printf("尝试从 namespace %s 删除镜像: %s", ns, imageToRemove)
+		if err := runCtrImageRemove(ctx, ns, imageToRemove); err != nil {
+			// k8s.io 删除失败直接返回，sealos.io 失败仅记录日志
+			if ns == "k8s.io" {
+				return err
+			}
+			log.Printf("从 namespace %s 删除镜像失败（忽略）: %v", ns, err)
+		}
+	}
+
+	log.Printf("镜像删除流程完成，等待 6 秒确保清理完成")
+	time.Sleep(6 * time.Second)
+	return nil
+}
+
+func runCtrImageRemove(ctx context.Context, namespace, image string) error {
+	cmd := exec.CommandContext(ctx, "ctr", "-n", namespace, "images", "rm", image)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -573,16 +607,13 @@ func (h *DevboxCommonHelper) RemoveCurrentBaseImage(ctx context.Context, namespa
 	if err := cmd.Run(); err != nil {
 		errMsg := stderr.String()
 		if errMsg != "" {
-			return fmt.Errorf("删除镜像失败: %w, stderr: %s", err, errMsg)
+			return fmt.Errorf("删除镜像 %s 失败: %w, stderr: %s", image, err, errMsg)
 		}
-		return fmt.Errorf("删除镜像失败: %w", err)
+		return fmt.Errorf("删除镜像 %s 失败: %w", image, err)
 	}
 
 	if out := stdout.String(); out != "" {
 		log.Printf("ctr 输出: %s", out)
 	}
-
-	log.Printf("镜像删除成功: %s，等待 6 秒确保清理完成", baseImage)
-	time.Sleep(6 * time.Second)
 	return nil
 }
