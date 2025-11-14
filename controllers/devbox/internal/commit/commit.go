@@ -7,6 +7,7 @@ import (
 	"log"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/remotes"
@@ -20,7 +21,10 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/cmd/image"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/login"
 	"github.com/containerd/nerdctl/v2/pkg/containerutil"
+	"github.com/containerd/platforms"
 	"github.com/labring/sealos/controllers/devbox/api/v1alpha2"
+	"github.com/labring/sealos/controllers/devbox/internal/commit/utils"
+	"github.com/containerd/containerd/v2/core/leases"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	ncdefaults "github.com/containerd/nerdctl/v2/pkg/defaults"
@@ -284,10 +288,41 @@ func (c *CommitterImpl) CommitNative(ctx context.Context, devboxName string, con
 	// get base image config
 	baseImgWithoutPlatform, err := c.containerdClient.ImageService().Get(ctx, info.Image)
 	if err != nil {
-		return EmptyDigest, fmt.Errorf("container %q lacks image (wasn't created by nerdctl?): %w", id, err)
+		return "", fmt.Errorf("container %q lacks image: %w", id, err)
 	}
 
+	// get base image with platform
+	platformStr := platforms.DefaultString()
+    ocispecPlatform, err := platforms.Parse(platformStr)
+    if err != nil {
+        return "", err
+    }
+    platformMC := platforms.Only(ocispecPlatform)
+	baseImg := containerd.NewImageWithPlatform(c.containerdClient, baseImgWithoutPlatform, platformMC)
 	
+	baseImgConfig, _, err := utils.ReadImageConfig(ctx, baseImg)
+	if err != nil {
+		return "", err
+	}
+
+	// TODO: check if all content exist
+
+
+	var (
+		differ = c.containerdClient.DiffService()
+		snName = info.Snapshotter
+		sn     = c.containerdClient.SnapshotService(snName)
+	)
+
+	// Don't gc me and clean the dirty data after 1 hour!
+	ctx, done, err := c.containerdClient.WithLease(ctx, leases.WithRandomID(), leases.WithExpiration(1*time.Hour))
+	if err != nil {
+		return "", fmt.Errorf("failed to create lease for commit: %w", err)
+	}
+	defer done(ctx)
+
+	// Sync filesystem to make sure that all the data writes in container could be persisted to disk.
+	syscall.Sync()
 	
 	return containerID,nil
 }
