@@ -46,7 +46,7 @@ type Committer interface {
 	CreateContainerNative(ctx context.Context, devboxName string, contentID string, baseImage string) (string, error)
 	Commit(ctx context.Context, devboxName string, contentID string, baseImage string, commitImage string) (string, error)
 	Push(ctx context.Context, imageName string) error
-	RemoveImage(ctx context.Context, imageName []string, force bool, async bool) error
+	RemoveImage(ctx context.Context, imageName string, force bool, async bool) error
 	RemoveContainer(ctx context.Context, containerName string) error
 	InitializeGC(ctx context.Context) error
 	GC(ctx context.Context) error
