@@ -3,6 +3,10 @@ package utils
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"time"
+	"encoding/base64"
+	"crypto/rand"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -27,4 +31,15 @@ func ReadImageConfig(ctx context.Context, img containerd.Image) (ocispec.Image, 
 		return config, configDesc, err
 	}
 	return config, configDesc, nil
+}
+
+
+
+// copied from github.com/containerd/containerd/rootfs/apply.go
+func UniquePart() string {
+	t := time.Now()
+	var b [3]byte
+	// Ignore read failures, just decreases uniqueness
+	rand.Read(b[:])
+	return fmt.Sprintf("%d-%s", t.Nanosecond(), base64.URLEncoding.EncodeToString(b[:]))
 }

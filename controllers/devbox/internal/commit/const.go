@@ -32,4 +32,14 @@ const (
 	DefaultGcInterval = 20 * time.Minute
 
 	EmptyDigest  = digest.Digest("")
+
+	DefaultCompressionType = "gzip"
+	DefaultImageFormat     = "oci"
+
+	CompressionTypeGzip  = "gzip"
+	CompressionTypeZstd = "zstd"
+	CompressionTypeUncompressed = "uncompressed"
+
+	ImageFormatOCI     = "oci"
+	ImageFormatDocker  = "docker"
 )

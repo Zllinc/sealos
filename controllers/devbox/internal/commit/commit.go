@@ -1,7 +1,9 @@
 package commit
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -10,26 +12,31 @@ import (
 	"syscall"
 	"time"
 
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/diff"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/core/remotes/docker/config"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/container"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/image"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/login"
 	"github.com/containerd/nerdctl/v2/pkg/containerutil"
+	ncdefaults "github.com/containerd/nerdctl/v2/pkg/defaults"
 	"github.com/containerd/platforms"
 	"github.com/labring/sealos/controllers/devbox/api/v1alpha2"
 	"github.com/labring/sealos/controllers/devbox/internal/commit/utils"
-	"github.com/containerd/containerd/v2/core/leases"
-
-	containerd "github.com/containerd/containerd/v2/client"
-	ncdefaults "github.com/containerd/nerdctl/v2/pkg/defaults"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -39,7 +46,7 @@ type Committer interface {
 	CreateContainerNative(ctx context.Context, devboxName string, contentID string, baseImage string) (string, error)
 	Commit(ctx context.Context, devboxName string, contentID string, baseImage string, commitImage string) (string, error)
 	Push(ctx context.Context, imageName string) error
-	RemoveImage(ctx context.Context, imageName string, force bool, async bool) error
+	RemoveImage(ctx context.Context, imageName []string, force bool, async bool) error
 	RemoveContainer(ctx context.Context, containerName string) error
 	InitializeGC(ctx context.Context) error
 	GC(ctx context.Context) error
@@ -59,6 +66,9 @@ type CommitterImpl struct {
 	gcContainerMap map[string]struct{}
 	gcImageMap     map[string]struct{}
 	gcInterval     time.Duration
+	// Commit options
+    compressionType   string  // "gzip", "zstd", "uncompressed"
+    imageFormat       string  // "oci", "docker"
 }
 
 // NewCommitter new a CommitterImpl with registry configuration
@@ -116,6 +126,8 @@ func NewCommitter(registryAddr, registryUsername, registryPassword string, merge
 		gcImageMap:             make(map[string]struct{}),
 		gcInterval:             DefaultGcInterval,
 		mergeBaseImageTopLayer: merge,
+		compressionType:        DefaultCompressionType,
+		imageFormat:            DefaultImageFormat,
 	}, nil
 }
 
@@ -271,8 +283,8 @@ func (c *CommitterImpl) CommitNative(ctx context.Context, devboxName string, con
 	}
 
 	// get container
-	container,err:=c.containerdClient.LoadContainer(ctx, containerID)
-	if err!=nil{
+	container, err := c.containerdClient.LoadContainer(ctx, containerID)
+	if err != nil {
 		return "", fmt.Errorf("failed to load container: %v", err)
 	}
 
@@ -282,8 +294,8 @@ func (c *CommitterImpl) CommitNative(ctx context.Context, devboxName string, con
 		return "", fmt.Errorf("failed to get container info: %v", err)
 	}
 
-	// container id 
-	id:=container.ID()
+	// container id
+	id := container.ID()
 
 	// get base image config
 	baseImgWithoutPlatform, err := c.containerdClient.ImageService().Get(ctx, info.Image)
@@ -293,20 +305,19 @@ func (c *CommitterImpl) CommitNative(ctx context.Context, devboxName string, con
 
 	// get base image with platform
 	platformStr := platforms.DefaultString()
-    ocispecPlatform, err := platforms.Parse(platformStr)
-    if err != nil {
-        return "", err
-    }
-    platformMC := platforms.Only(ocispecPlatform)
+	ocispecPlatform, err := platforms.Parse(platformStr)
+	if err != nil {
+		return "", err
+	}
+	platformMC := platforms.Only(ocispecPlatform)
 	baseImg := containerd.NewImageWithPlatform(c.containerdClient, baseImgWithoutPlatform, platformMC)
-	
+
 	baseImgConfig, _, err := utils.ReadImageConfig(ctx, baseImg)
 	if err != nil {
 		return "", err
 	}
 
 	// TODO: check if all content exist
-
 
 	var (
 		differ = c.containerdClient.DiffService()
@@ -323,8 +334,56 @@ func (c *CommitterImpl) CommitNative(ctx context.Context, devboxName string, con
 
 	// Sync filesystem to make sure that all the data writes in container could be persisted to disk.
 	syscall.Sync()
-	
-	return containerID,nil
+
+	// Step 1: Create diff layer (export container changes)
+	diffLayerDesc, diffID, err := c.createDiffLayer(ctx, id, sn, c.containerdClient.ContentStore(), differ)
+	if err != nil {
+		return "", fmt.Errorf("failed to create diff layer: %w", err)
+	}
+
+	// Step 2: Generate new image config
+	imageConfig, err := c.generateImageConfig(ctx, container, baseImg, baseImgConfig, diffID)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate image config: %w", err)
+	}
+
+	// Step 3: Apply diff layer to snapshotter (create new snapshot chain)
+	rootfsID := calculateChainID(imageConfig.RootFS.DiffIDs).String()
+	if err := c.applyDiffLayer(ctx, rootfsID, baseImgConfig, sn, differ, diffLayerDesc); err != nil {
+		return "", fmt.Errorf("failed to apply diff layer: %w", err)
+	}
+
+	// Step 4: Write image contents (config + manifest) to content store
+	manifestDesc, configDigest, err := c.writeImageContents(ctx, snName, baseImg, imageConfig, diffLayerDesc)
+	if err != nil {
+		return "", fmt.Errorf("failed to write image contents: %w", err)
+	}
+
+	// Step 5: Create image object in image service
+	img := images.Image{
+		Name:      commitImage,
+		Target:    manifestDesc,
+		CreatedAt: time.Now(),
+	}
+
+	imageService := c.containerdClient.ImageService()
+	if _, err := imageService.Update(ctx, img); err != nil {
+		if !errdefs.IsNotFound(err) {
+			return "", fmt.Errorf("failed to update image: %w", err)
+		}
+		if _, err := imageService.Create(ctx, img); err != nil {
+			return "", fmt.Errorf("failed to create image %s: %w", commitImage, err)
+		}
+	}
+
+	// Step 6: Unpack the image to snapshotter (make it runnable)
+	committedImage := containerd.NewImage(c.containerdClient, img)
+	if err := committedImage.Unpack(ctx, snName); err != nil {
+		return "", fmt.Errorf("failed to unpack image: %w", err)
+	}
+
+	fmt.Printf("Successfully committed container %s to image %s (digest: %s)\n", id, commitImage, configDigest)
+	return containerID, nil
 }
 
 // CreateContainer create container with labels
@@ -867,4 +926,339 @@ func (c *CommitterImpl) Close() error {
 		return c.conn.Close()
 	}
 	return nil
+}
+
+// ==================== Commit Native Helper Functions ====================
+
+// createDiffLayer creates a diff layer from container snapshot
+func (c *CommitterImpl) createDiffLayer(ctx context.Context, containerID string, sn snapshots.Snapshotter, cs content.Store, differ diff.Comparer) (ocispec.Descriptor, digest.Digest, error) {
+	diffOpts := make([]diff.Opt, 0)
+    var mediaType string
+
+    switch c.imageFormat {
+    case ImageFormatOCI:
+        switch c.compressionType {
+        case CompressionTypeZstd:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerZstd))
+            mediaType = ocispec.MediaTypeImageLayerZstd
+        default: // gzip
+		    diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerGzip))
+            mediaType = ocispec.MediaTypeImageLayerGzip
+        }
+    case ImageFormatDocker:
+        switch c.compressionType {
+        case CompressionTypeZstd:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerZstd))
+            mediaType = images.MediaTypeDockerSchema2LayerZstd
+        default: // gzip
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerGzip))
+            mediaType = images.MediaTypeDockerSchema2LayerGzip
+        }
+    default:
+        // Default to Docker Schema2 media types for compatibility
+		switch c.compressionType {
+		case CompressionTypeZstd:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerZstd))
+			mediaType = images.MediaTypeDockerSchema2LayerZstd
+		default:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerGzip))
+			mediaType = images.MediaTypeDockerSchema2LayerGzip
+		}
+    }
+	
+	// Get snapshot info
+	info, err := sn.Stat(ctx, containerID)
+	if err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to stat snapshot: %w", err)
+	}
+
+	parent := info.Parent
+	if c.mergeBaseImageTopLayer {
+		secondInfo, err := sn.Stat(ctx, parent)
+		if err != nil {
+			return ocispec.Descriptor{}, "", fmt.Errorf("failed to stat parent snapshot: %w", err)
+		}
+		if secondInfo.Parent != "" {
+			parent = secondInfo.Parent
+		}
+	}
+
+	lowerKey := fmt.Sprintf("%s-parent-view-%s", parent, utils.UniquePart())
+	lower, err := sn.View(ctx, lowerKey, parent)
+	if err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to create lower snapshot: %w", err)
+	}
+	defer doWithTimeout(ctx, func(cleanupCtx context.Context) {
+		if err := sn.Remove(cleanupCtx, lowerKey); err != nil {
+			log.Printf("Warning: failed to cleanup snapshot %s: %v", lowerKey, err)
+		}
+	})
+
+	var upper []mount.Mount
+	if info.Kind == snapshots.KindActive {
+		upper, err = sn.Mounts(ctx, containerID)
+		if err != nil {
+			return ocispec.Descriptor{}, "", fmt.Errorf("failed to get container mounts: %w", err)
+		}
+	} else {
+		upperKey := fmt.Sprintf("%s-view-%s", containerID, utils.UniquePart())
+		upper, err = sn.View(ctx, upperKey, containerID)
+		if err != nil {
+			return ocispec.Descriptor{}, "", fmt.Errorf("failed to create upper snapshot: %w", err)
+		} 
+		defer doWithTimeout(ctx, func(cleanupCtx context.Context) {
+			if err := sn.Remove(cleanupCtx, upperKey); err != nil {
+				log.Printf("Warning: failed to cleanup snapshot %s: %v", upperKey, err)
+			}
+		})
+	}
+
+	desc, err := differ.Compare(ctx, lower, upper, diffOpts...)
+	if err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to create diff: %w", err)
+	}
+
+	// Get the uncompressed digest (diffID)
+	csInfo, err := cs.Info(ctx, desc.Digest)
+	if err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to get diff info: %w", err)
+	}
+
+	diffIDStr, ok := csInfo.Labels["containerd.io/uncompressed"]
+	if !ok {
+		return ocispec.Descriptor{}, "", fmt.Errorf("diff layer missing uncompressed digest")
+	}
+
+	diffID, err := digest.Parse(diffIDStr)
+	if err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to parse diffID: %w", err)
+	}
+
+	return ocispec.Descriptor{
+		MediaType: mediaType,
+		Digest:    desc.Digest,
+		Size:      csInfo.Size,
+	}, diffID, nil
+}
+
+// generateImageConfig generates OCI image config for the committed image
+func (c *CommitterImpl) generateImageConfig(ctx context.Context, container containerd.Container, baseImg containerd.Image, baseConfig ocispec.Image, diffID digest.Digest) (ocispec.Image, error) {
+	spec, err := container.Spec(ctx)
+	if err != nil {
+		return ocispec.Image{}, fmt.Errorf("failed to get container spec: %w", err)
+	}
+
+	// Copy base config
+	newConfig := baseConfig
+
+	// Build created by string from container process
+	createdBy := ""
+	if spec.Process != nil && len(spec.Process.Args) > 0 {
+		createdBy = strings.Join(spec.Process.Args, " ")
+	}
+
+	createdTime := time.Now()
+
+	// Remove base image top layer if configured
+	if c.mergeBaseImageTopLayer && len(baseConfig.RootFS.DiffIDs) > 1 {
+		newConfig.RootFS.DiffIDs = baseConfig.RootFS.DiffIDs[:len(baseConfig.RootFS.DiffIDs)-1]
+		newConfig.History = baseConfig.History[:len(baseConfig.History)-1]
+	}
+
+	// Append new diff layer
+	newConfig.RootFS.DiffIDs = append(newConfig.RootFS.DiffIDs, diffID)
+
+	// Append history entry
+	newConfig.History = append(newConfig.History, ocispec.History{
+		Created:   &createdTime,
+		CreatedBy: createdBy,
+		Comment:   fmt.Sprintf("Committed by devbox from container %s", container.ID()),
+	})
+
+	newConfig.Created = &createdTime
+
+	return newConfig, nil
+}
+
+// applyDiffLayer applies the diff layer to snapshotter, creating a new snapshot chain
+func (c *CommitterImpl) applyDiffLayer(ctx context.Context, chainID string, baseConfig ocispec.Image, sn snapshots.Snapshotter, differ diff.Applier, diffDesc ocispec.Descriptor) error {
+	// Calculate parent snapshot
+	parent := calculateChainID(baseConfig.RootFS.DiffIDs).String()
+
+	// If removing base image top layer, use parent of parent
+	if c.mergeBaseImageTopLayer {
+		info, err := sn.Stat(ctx, parent)
+		if err != nil {
+			return fmt.Errorf("failed to stat parent snapshot: %w", err)
+		}
+		parent = info.Parent
+	}
+
+	// Generate temporary snapshot key
+	key := fmt.Sprintf("devbox-commit-%d-%s", time.Now().UnixNano(), chainID[:12])
+
+	// Prepare new snapshot based on parent
+	mounts, err := sn.Prepare(ctx, key, parent)
+	if err != nil {
+		return fmt.Errorf("failed to prepare snapshot: %w", err)
+	}
+
+	// Cleanup on error
+	defer func() {
+		if err != nil {
+			doWithTimeout(ctx, func(cleanupCtx context.Context) {
+				if removeErr := sn.Remove(cleanupCtx, key); removeErr != nil {
+					log.Printf("Warning: failed to cleanup snapshot %s: %v", key, removeErr)
+				}
+			})
+		}
+	}()
+
+	// Apply diff layer to mounts
+	if _, err = differ.Apply(ctx, diffDesc, mounts); err != nil {
+		return fmt.Errorf("failed to apply diff: %w", err)
+	}
+
+	// Commit as final snapshot with chainID as name
+	if err = sn.Commit(ctx, chainID, key); err != nil {
+		if !errdefs.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to commit snapshot: %w", err)
+		}
+		// Snapshot already exists, this is fine
+	}
+
+	return nil
+}
+
+// writeImageContents writes image config and manifest to content store
+func (c *CommitterImpl) writeImageContents(ctx context.Context, snapshotterName string, baseImg containerd.Image, newConfig ocispec.Image, diffLayerDesc ocispec.Descriptor) (ocispec.Descriptor, digest.Digest, error) {
+	cs := baseImg.ContentStore()
+
+	// 1. Serialize and write image config
+	configJSON, err := json.Marshal(newConfig)
+	if err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	configDesc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageConfig,
+		Digest:    digest.FromBytes(configJSON),
+		Size:      int64(len(configJSON)),
+	}
+
+	// 2. Read base manifest and build new layers list
+	baseMfst, err := readManifest(ctx, baseImg)
+	if err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to read base manifest: %w", err)
+	}
+
+	layers := baseMfst.Layers
+	if c.mergeBaseImageTopLayer && len(layers) > 1 {
+		layers = layers[:len(layers)-1]
+	}
+	layers = append(layers, diffLayerDesc)
+
+	// 3. Build new manifest
+	newMfst := ocispec.Manifest{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    configDesc,
+		Layers:    layers,
+	}
+
+	mfstJSON, err := json.Marshal(newMfst)
+	if err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to marshal manifest: %w", err)
+	}
+
+	mfstDesc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Digest:    digest.FromBytes(mfstJSON),
+		Size:      int64(len(mfstJSON)),
+	}
+
+	// 4. Write manifest with GC references to all layers
+	mfstLabels := map[string]string{
+		"containerd.io/gc.ref.content.0": configDesc.Digest.String(),
+	}
+	for i, layer := range layers {
+		mfstLabels[fmt.Sprintf("containerd.io/gc.ref.content.%d", i+1)] = layer.Digest.String()
+	}
+
+	if err := content.WriteBlob(ctx, cs, mfstDesc.Digest.String(), bytes.NewReader(mfstJSON), mfstDesc, content.WithLabels(mfstLabels)); err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to write manifest: %w", err)
+	}
+
+	// 5. Write config with GC reference to snapshotter
+	configLabels := map[string]string{
+		fmt.Sprintf("containerd.io/gc.ref.snapshot.%s", snapshotterName): calculateChainID(newConfig.RootFS.DiffIDs).String(),
+	}
+
+	if err := content.WriteBlob(ctx, cs, configDesc.Digest.String(), bytes.NewReader(configJSON), configDesc, content.WithLabels(configLabels)); err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("failed to write config: %w", err)
+	}
+
+	return mfstDesc, configDesc.Digest, nil
+}
+
+// calculateChainID calculates the ChainID for a list of DiffIDs
+// ChainID([]DiffID) = SHA256(ChainID(DiffIDs[:n-1]) + " " + DiffID[n])
+func calculateChainID(diffIDs []digest.Digest) digest.Digest {
+	if len(diffIDs) == 0 {
+		return ""
+	}
+	if len(diffIDs) == 1 {
+		return diffIDs[0]
+	}
+
+	// Recursively calculate: ChainID(n) = SHA256(ChainID(n-1) + " " + DiffID(n))
+	parent := diffIDs[0]
+	for i := 1; i < len(diffIDs); i++ {
+		dgst := digest.SHA256.FromString(parent.String() + " " + diffIDs[i].String())
+		parent = dgst
+	}
+	return parent
+}
+
+// readManifest reads the OCI manifest from an image
+func readManifest(ctx context.Context, img containerd.Image) (ocispec.Manifest, error) {
+	var manifest ocispec.Manifest
+
+	// Read manifest from content store
+	manifestBlob, err := content.ReadBlob(ctx, img.ContentStore(), img.Target())
+	if err != nil {
+		return manifest, fmt.Errorf("failed to read manifest blob: %w", err)
+	}
+
+	// Unmarshal manifest
+	if err := json.Unmarshal(manifestBlob, &manifest); err != nil {
+		return manifest, fmt.Errorf("failed to unmarshal manifest: %w", err)
+	}
+
+	return manifest, nil
+}
+
+// clearCancel wraps a context to ignore parent cancellation while preserving values
+type clearCancel struct {
+	context.Context
+}
+
+func (cc clearCancel) Deadline() (deadline time.Time, ok bool) {
+	return // No deadline
+}
+
+func (cc clearCancel) Done() <-chan struct{} {
+	return nil // Never done
+}
+
+func (cc clearCancel) Err() error {
+	return nil // No error
+}
+
+// doWithTimeout runs the provided function with a context that ignores parent
+// cancellation but has a 10 second timeout. This ensures cleanup operations
+// complete even if the parent context is cancelled (e.g., user interruption).
+func doWithTimeout(ctx context.Context, do func(context.Context)) {
+	cleanupCtx, cancel := context.WithTimeout(clearCancel{ctx}, 10*time.Second)
+	defer cancel()
+	do(cleanupCtx)
 }
