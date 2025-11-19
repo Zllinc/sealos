@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"runtime"
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd/v2/client"
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/core/remotes/docker/config"
@@ -18,9 +19,11 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/cmd/container"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/image"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/login"
-	"github.com/containerd/nerdctl/v2/pkg/containerutil"
 	ncdefaults "github.com/containerd/nerdctl/v2/pkg/defaults"
 
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -41,7 +44,7 @@ type Committer interface {
 
 type CommitterImpl struct {
 	runtimeServiceClient runtimeapi.RuntimeServiceClient // CRI client
-	containerdClient     *client.Client                  // containerd client
+	containerdClient     *containerd.Client              // containerd client
 	conn                 *grpc.ClientConn                // gRPC connection
 	globalOptions        *types.GlobalCommandOptions     // global options
 	registryAddr         string
@@ -93,7 +96,7 @@ func NewCommitter(registryAddr, registryUsername, registryPassword string, merge
 	}
 
 	// create Containerd client
-	containerdClient, err := client.NewWithConn(conn, client.WithDefaultNamespace(DefaultNamespace))
+	containerdClient, err := containerd.NewWithConn(conn, containerd.WithDefaultNamespace(DefaultNamespace))
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to create containerd client: %v", err)
@@ -122,74 +125,137 @@ func (c *CommitterImpl) CreateContainer(ctx context.Context, devboxName string, 
 	fmt.Println("========>>>> create container", devboxName, contentID, baseImage)
 	ctx = namespaces.WithNamespace(ctx, DefaultNamespace)
 
-	// check connection status, if connection is bad, try to reconnect
-	if err := c.CheckConnection(ctx); err != nil {
-		log.Printf("Connection check failed: %v, attempting to reconnect...", err)
-		if reconnectErr := c.Reconnect(ctx); reconnectErr != nil {
-			return "", fmt.Errorf("failed to reconnect: %v", reconnectErr)
+	// pull image and unpack to devbox snapshotter
+	image, err := c.containerdClient.GetImage(ctx, baseImage)
+	if err != nil {
+		log.Printf("Image %s not found locally, pulling...", baseImage)
+
+		// create resolver for authentication
+		resolver, err := GetResolver(ctx, c.registryUsername, c.registryPassword)
+		if err != nil {
+			return "", fmt.Errorf("failed to create resolver: %w", err)
+		}
+
+		// pull image and unpack to devbox snapshotter
+		image, err = c.containerdClient.Pull(ctx, baseImage,
+			containerd.WithResolver(resolver),
+			containerd.WithPullUnpack,
+			containerd.WithPullSnapshotter(DefaultDevboxSnapshotter))
+		if err != nil {
+			return "", fmt.Errorf("failed to pull image %s: %w", baseImage, err)
+		}
+		log.Printf("Successfully pulled image: %s", baseImage)
+	} else {
+		// image exists, check if it is unpacked in devbox snapshotter
+		unpacked, err := image.IsUnpacked(ctx, DefaultDevboxSnapshotter)
+		if err != nil {
+			log.Printf("Warning: failed to check if image is unpacked in devbox snapshotter: %v", err)
+		} else if !unpacked {
+			log.Printf("Image %s exists but not unpacked in devbox snapshotter, unpacking...", baseImage)
+			// unpack image in devbox snapshotter
+			if err := image.Unpack(ctx, DefaultDevboxSnapshotter); err != nil {
+				return "", fmt.Errorf("failed to unpack image %s in devbox snapshotter: %w", baseImage, err)
+			}
+			log.Printf("Successfully unpacked image %s in devbox snapshotter", baseImage)
 		}
 	}
 
-	// create container with labels
-	originalAnnotations := map[string]string{
+	// prepare container labels
+	annotations := map[string]string{
 		v1alpha2.AnnotationContentID:    contentID,
 		v1alpha2.AnnotationStorageLimit: AnnotationUseLimitValue,
 		AnnotationKeyNamespace:          DefaultNamespace,
 		AnnotationKeyImageName:          baseImage,
 	}
 
-	// Add merge base image layers annotation if enabled
 	if c.mergeBaseImageTopLayer {
-		originalAnnotations[v1alpha2.AnnotationInit] = AnnotationImageFromValue
+		annotations[v1alpha2.AnnotationInit] = AnnotationImageFromValue
 	}
 
-	// convert labels to "containerd.io/snapshot/devbox-" format
-	convertedLabels := convertLabels(originalAnnotations)
-	convertedAnnotations := convertMapToSlice(originalAnnotations)
+	// prepare snapshot labels
+	snapshotLabels := convertLabels(annotations)
 
-	// create container options
-	createOpt := types.ContainerCreateOptions{
-		GOptions:       *c.globalOptions,
-		Runtime:        DefaultRuntime, // user devbox runtime
-		Name:           fmt.Sprintf("devbox-%s-container-%d", devboxName, time.Now().UnixMicro()),
-		Pull:           "missing",
-		InRun:          false, // not start container
-		Rm:             false,
-		LogDriver:      "json-file",
-		StopSignal:     "SIGTERM",
-		Restart:        "unless-stopped",
-		Interactive:    false,  // not interactive, avoid conflict with Detach
-		Cgroupns:       "host", // add cgroupns mode
-		Detach:         true,   // run in background
-		Rootfs:         false,
-		Label:          convertedAnnotations,
-		SnapshotLabels: convertedLabels,
-		ImagePullOpt: types.ImagePullOptions{
-			GOptions: *c.globalOptions,
-		},
+	// generate container name
+	containerName := fmt.Sprintf("devbox-%s-container-%d", devboxName, time.Now().UnixMicro())
+	log.Printf("Creating container with name: %s", containerName)
+
+	// prepare snapshot labels options
+	var snapshotOpts []snapshots.Opt
+	if len(snapshotLabels) > 0 {
+		// add labels to snapshot options
+		snapshotOpts = append(snapshotOpts, snapshots.WithLabels(snapshotLabels))
+		log.Printf("Snapshot labels: %v", snapshotLabels)
 	}
 
-	// create network manager
-	networkManager, err := containerutil.NewNetworkingOptionsManager(createOpt.GOptions,
-		types.NetworkOptions{
-			NetworkSlice: []string{DefaultNetworkMode},
-		}, c.containerdClient)
+	// prepare OCI spec options
+	var specOpts []oci.SpecOpts
+
+	// 1. Start with default OCI spec
+	specOpts = append(specOpts, oci.WithDefaultSpec(),
+		oci.WithImageConfig(image),
+		oci.WithHostNamespace(specs.CgroupNamespace),
+	)
+
+	// 2. Apply image config to OCI spec (includes env, working dir, entrypoint, cmd, user, etc.)
+	specOpts = append(specOpts, oci.WithImageConfig(image))
+	specOpts = append(specOpts, oci.WithDefaultPathEnv)
+
+	// 3. Set cgroup namespace to host mode (required for devbox storage management)
+	specOpts = append(specOpts, oci.WithHostNamespace(specs.CgroupNamespace))
+
+	if runtime.GOOS == "linux" {
+		specOpts = append(specOpts, oci.WithDefaultUnixDevices)
+		specOpts = append(specOpts, oci.WithMounts([]specs.Mount{
+			{
+				Type:        "cgroup",
+				Source:      "cgroup",
+				Destination: "/sys/fs/cgroup",
+				Options:     []string{"ro", "nosuid", "noexec", "nodev"},
+			},
+		}))
+	}
+
+	// 4. Ensure annotations are propagated to OCI spec
+	// Convert annotations map to OCI annotations format
+	ociAnnotations := make(map[string]string)
+	for k, v := range annotations {
+		ociAnnotations[k] = v
+	}
+	if len(ociAnnotations) > 0 {
+		specOpts = append(specOpts, oci.WithAnnotations(ociAnnotations))
+	}
+
+	// prepare container options
+	var containerOpts []containerd.NewContainerOpts
+
+	// 1. Set snapshotter (must be before WithNewSnapshot)
+	containerOpts = append(containerOpts, containerd.WithSnapshotter(DefaultDevboxSnapshotter))
+
+	// 2. Create new snapshot with labels
+	containerOpts = append(containerOpts, containerd.WithNewSnapshot(containerName, image, snapshotOpts...))
+
+	// 3. Associate image with container
+	containerOpts = append(containerOpts, containerd.WithImage(image))
+
+	// 4. Set image stop signal (default SIGTERM, like nerdctl does)
+	containerOpts = append(containerOpts, containerd.WithImageStopSignal(image, "SIGTERM"))
+
+	// 5. Set container labels (annotations)
+	containerOpts = append(containerOpts, containerd.WithAdditionalContainerLabels(annotations))
+
+	// 6. Set runtime
+	containerOpts = append(containerOpts, containerd.WithRuntime(DefaultRuntime, nil))
+
+	// 7. Apply OCI spec to container
+	containerOpts = append(containerOpts, containerd.WithNewSpec(specOpts...))
+
+	// create container object
+	container, err := c.containerdClient.NewContainer(ctx, containerName, containerOpts...)
 	if err != nil {
-		log.Println("failed to create network manager:", err)
-		return "", fmt.Errorf("failed to create network manager: %v", err)
+		return "", fmt.Errorf("failed to create container %s: %w", containerName, err)
 	}
 
-	// create container
-	container, cleanup, err := container.Create(ctx, c.containerdClient, []string{originalAnnotations[AnnotationKeyImageName]}, networkManager, createOpt)
-	if err != nil {
-		log.Println("failed to create container:", err)
-		return "", fmt.Errorf("failed to create container: %v", err)
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-
-	log.Printf("container created successfully: %s\n", container.ID())
+	log.Printf("Container created successfully: %s (ID: %s)", containerName, container.ID())
 	return container.ID(), nil
 }
 
@@ -216,7 +282,7 @@ func (c *CommitterImpl) DeleteContainer(ctx context.Context, containerName strin
 
 		// delete task
 		log.Printf("Deleting task...")
-		_, err = task.Delete(ctx, client.WithProcessKill)
+		_, err = task.Delete(ctx, containerd.WithProcessKill)
 		if err != nil {
 			log.Printf("Warning: failed to delete task: %v", err)
 		} else {
@@ -225,7 +291,7 @@ func (c *CommitterImpl) DeleteContainer(ctx context.Context, containerName strin
 	}
 
 	// delete container (include snapshot)
-	err = container.Delete(ctx, client.WithSnapshotCleanup)
+	err = container.Delete(ctx, containerd.WithSnapshotCleanup)
 	if err != nil {
 		return fmt.Errorf("failed to delete container: %v", err)
 	}
@@ -365,7 +431,7 @@ func (c *CommitterImpl) Push(ctx context.Context, imageName string) error {
 
 	// push image
 	err = c.containerdClient.Push(ctx, imageName, imageRef.Target(),
-		client.WithResolver(resolver),
+		containerd.WithResolver(resolver),
 	)
 	if err != nil {
 		log.Printf("failed to push image: %s, err: %v\n", imageName, err)
@@ -637,7 +703,7 @@ func (c *CommitterImpl) Reconnect(ctx context.Context) error {
 	}
 
 	// recreate containerd client
-	containerdClient, err := client.NewWithConn(conn, client.WithDefaultNamespace(DefaultNamespace))
+	containerdClient, err := containerd.NewWithConn(conn, containerd.WithDefaultNamespace(DefaultNamespace))
 	if err != nil {
 		conn.Close()
 		return fmt.Errorf("failed to recreate containerd client: %v", err)
