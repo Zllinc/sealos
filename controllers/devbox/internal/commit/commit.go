@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"syscall"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/remotes"
@@ -131,7 +132,9 @@ func (c *CommitterImpl) CreateContainer(ctx context.Context, devboxName string, 
 		log.Printf("Image %s not found locally, pulling...", baseImage)
 
 		// create resolver for authentication
-		resolver, err := GetResolver(ctx, c.registryUsername, c.registryPassword)
+		// Pass c.registryAddr as targetRegistry to only apply credentials to that registry
+		// For other registries (like ghcr.io), it will use Docker config or anonymous access
+		resolver, err := GetResolver(ctx, c.registryUsername, c.registryPassword, c.registryAddr)
 		if err != nil {
 			return "", fmt.Errorf("failed to create resolver: %w", err)
 		}
@@ -273,7 +276,7 @@ func (c *CommitterImpl) DeleteContainer(ctx context.Context, containerName strin
 		log.Printf("Stopping task for container: %s", containerName)
 
 		// force kill task
-		err = task.Kill(ctx, 9) // SIGKILL
+		err = task.Kill(ctx, syscall.SIGKILL) // SIGKILL
 		if err != nil {
 			log.Printf("Warning: failed to send SIGKILL: %v", err)
 		} else {
@@ -291,9 +294,15 @@ func (c *CommitterImpl) DeleteContainer(ctx context.Context, containerName strin
 	}
 
 	// delete container (include snapshot)
-	err = container.Delete(ctx, containerd.WithSnapshotCleanup)
-	if err != nil {
-		return fmt.Errorf("failed to delete container: %v", err)
+	var delOpts []containerd.DeleteOpts
+	if _, err := container.Image(ctx); err == nil {
+		delOpts = append(delOpts, containerd.WithSnapshotCleanup)
+	}
+	if container.Delete(ctx, delOpts...) != nil {
+		if container.Delete(ctx)!=nil{
+			log.Printf("Warning: failed to delete container: %v", err)
+			return nil
+		}
 	}
 
 	log.Printf("Container deleted: %s successfully", containerName)
@@ -417,7 +426,8 @@ func (c *CommitterImpl) Push(ctx context.Context, imageName string) error {
 	}
 
 	//set resolver
-	resolver, err := GetResolver(ctx, c.registryUsername, c.registryPassword)
+	// When pushing, we want to use credentials for the target registry
+	resolver, err := GetResolver(ctx, c.registryUsername, c.registryPassword, c.registryAddr)
 	if err != nil {
 		log.Printf("failed to set resolver, Image: %s, err: %v\n", imageName, err)
 		return err
@@ -582,23 +592,74 @@ func (c *CommitterImpl) forceGC(ctx context.Context) error {
 	return nil
 }
 
-// GetResolver get resolver
-func GetResolver(ctx context.Context, username string, secret string) (remotes.Resolver, error) {
-	resolverOptions := docker.ResolverOptions{
-		Tracker: docker.NewInMemoryTracker(),
-	}
-	hostOptions := config.HostOptions{}
-	if username == "" && secret == "" {
-		hostOptions.Credentials = nil
-	} else {
-		// TODO: fix this, use flags or configs to set mulit registry credentials
-		hostOptions.Credentials = func(host string) (string, string, error) {
-			return username, secret, nil
+// GetResolver get resolver with target registry support
+// targetRegistry: if specified, only this registry will use the provided credentials
+// For other registries, it will use the default credential chain (Docker config, anonymous)
+func GetResolver(ctx context.Context, username string, secret string, targetRegistry string) (remotes.Resolver, error) {
+	// Extract the registry domain from targetRegistry (remove http:// or https://)
+	registryDomain := strings.TrimPrefix(strings.TrimPrefix(targetRegistry, "https://"), "http://")
+	isTargetInsecure := false
+
+	// Detect if the target registry is insecure (HTTP instead of HTTPS)
+	// 1. Explicitly starts with http://
+	// 2. Contains non-standard ports (like :5000, :8080, etc.) which usually indicate local/insecure registries
+	// 3. Is a local address (localhost, 127.0.0.1, sealos.hub, etc.)
+	if targetRegistry != "" {
+		if strings.HasPrefix(targetRegistry, "http://") {
+			isTargetInsecure = true
+		} else if strings.Contains(registryDomain, ":") {
+			// Has a port number, likely a local/insecure registry
+			// Standard HTTPS registries don't usually specify :443
+			isTargetInsecure = true
+		} else if strings.Contains(registryDomain, "localhost") ||
+			strings.Contains(registryDomain, "127.0.0.1") ||
+			strings.Contains(registryDomain, "sealos.hub") {
+			isTargetInsecure = true
 		}
 	}
-	hostOptions.DefaultScheme = "http"
-	hostOptions.DefaultTLS = nil
-	resolverOptions.Hosts = config.ConfigureHosts(ctx, hostOptions)
+
+	// Create a custom Hosts function that applies different configs for different registries
+	customHosts := func(host string) ([]docker.RegistryHost, error) {
+		// Check if this is the target registry
+		isTargetHost := strings.Contains(host, registryDomain) || strings.Contains(registryDomain, host)
+
+		// Create host-specific options
+		hostOptions := config.HostOptions{}
+
+		// Set credentials
+		if username != "" && secret != "" && targetRegistry != "" && isTargetHost {
+			hostOptions.Credentials = func(h string) (string, string, error) {
+				log.Printf("Using provided credentials for registry: %s (target: %s)", h, registryDomain)
+				return username, secret, nil
+			}
+		} else {
+			// For other registries, let containerd use its default credential chain
+			hostOptions.Credentials = func(h string) (string, string, error) {
+				log.Printf("Using default credentials for registry: %s (not target: %s)", h, registryDomain)
+				return "", "", nil
+			}
+		}
+
+		// Set scheme: HTTP for insecure target registry, HTTPS for others
+		if isTargetHost && isTargetInsecure {
+			hostOptions.DefaultScheme = "http"
+			log.Printf("Using HTTP scheme for insecure target registry: %s", host)
+		} else {
+			// Let containerd use default HTTPS for secure registries
+			log.Printf("Using default (HTTPS) scheme for registry: %s", host)
+		}
+
+		hostOptions.DefaultTLS = nil
+
+		// Use containerd's default host configuration with our custom options
+		return config.ConfigureHosts(ctx, hostOptions)(host)
+	}
+
+	resolverOptions := docker.ResolverOptions{
+		Tracker: docker.NewInMemoryTracker(),
+		Hosts:   customHosts,
+	}
+
 	return docker.NewResolver(resolverOptions), nil
 }
 
