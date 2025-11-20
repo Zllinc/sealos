@@ -1,6 +1,8 @@
 module github.com/labring/sealos/controllers/devbox
 
-go 1.24.0
+go 1.24.2
+
+toolchain go1.24.3
 
 require (
 	github.com/containerd/containerd/v2 v2.1.4
@@ -11,6 +13,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.25.1
 	github.com/onsi/gomega v1.38.1
+	github.com/opencontainers/runtime-spec v1.2.1
 	github.com/stretchr/testify v1.10.0
 	golang.org/x/crypto v0.42.0
 	google.golang.org/grpc v1.73.0
@@ -132,7 +135,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
-	github.com/opencontainers/runtime-spec v1.2.1 // indirect
 	github.com/opencontainers/runtime-tools v0.9.1-0.20221107090550-2e043c6bd626 // indirect
 	github.com/opencontainers/selinux v1.12.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect

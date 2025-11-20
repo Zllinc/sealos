@@ -88,7 +88,7 @@ func TestDeleteContainer(t *testing.T) {
 	fmt.Printf("=== Total %d containers ===\n", len(containers))
 
 	// delete container
-	err = committer.(*CommitterImpl).DeleteContainer(ctx, containerID)
+	err = committer.(*CommitterImpl).RemoveContainer(ctx, containerID)
 	assert.NoError(t, err)
 
 	containers, err = committer.(*CommitterImpl).containerdClient.Containers(ctx)
@@ -155,7 +155,7 @@ func TestErrorCases(t *testing.T) {
 	assert.Error(t, err)
 
 	// test use not exist container to delete
-	err = committer.(*CommitterImpl).DeleteContainer(ctx, "not-exist-container")
+	err = committer.(*CommitterImpl).RemoveContainer(ctx, "not-exist-container")
 	assert.Error(t, err)
 
 	// test get not exist container label
@@ -242,7 +242,7 @@ func TestRuntimeSelection(t *testing.T) {
 	fmt.Printf("Runtime Match: %v\n", info.Runtime.Name == DefaultRuntime)
 
 	// cleanup
-	err = committer.(*CommitterImpl).DeleteContainer(ctx, containerID)
+	err = committer.(*CommitterImpl).RemoveContainer(ctx, containerID)
 	assert.NoError(t, err)
 }
 

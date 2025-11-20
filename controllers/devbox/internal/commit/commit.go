@@ -7,8 +7,8 @@ import (
 	"log"
 	"runtime"
 	"strings"
-	"time"
 	"syscall"
+	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/remotes"
@@ -263,7 +263,13 @@ func (c *CommitterImpl) CreateContainer(ctx context.Context, devboxName string, 
 }
 
 // DeleteContainer delete container
-func (c *CommitterImpl) DeleteContainer(ctx context.Context, containerName string) error {
+func (c *CommitterImpl) RemoveContainer(ctx context.Context, containerName string) error {
+	// check containerID is not empty
+	if containerName == "" {
+		return fmt.Errorf("[RemoveContainer]containerID is empty")
+	}
+
+	fmt.Println("========>>>> remove container", containerName)
 	ctx = namespaces.WithNamespace(ctx, DefaultNamespace)
 	container, err := c.containerdClient.LoadContainer(ctx, containerName)
 	if err != nil {
@@ -299,7 +305,7 @@ func (c *CommitterImpl) DeleteContainer(ctx context.Context, containerName strin
 		delOpts = append(delOpts, containerd.WithSnapshotCleanup)
 	}
 	if container.Delete(ctx, delOpts...) != nil {
-		if container.Delete(ctx)!=nil{
+		if container.Delete(ctx) != nil {
 			log.Printf("Warning: failed to delete container: %v", err)
 			return nil
 		}
@@ -331,37 +337,37 @@ func (c *CommitterImpl) SetLvRemovable(ctx context.Context, containerID string, 
 	return nil
 }
 
-// RemoveContainer remove container
-func (c *CommitterImpl) RemoveContainer(ctx context.Context, containerID string) error {
-	// check containerID is not empty
-	if containerID == "" {
-		return fmt.Errorf("[RemoveContainer]containerID is empty")
-	}
+// // RemoveContainer remove container
+// func (c *CommitterImpl) RemoveContainer(ctx context.Context, containerID string) error {
+// 	// check containerID is not empty
+// 	if containerID == "" {
+// 		return fmt.Errorf("[RemoveContainer]containerID is empty")
+// 	}
 
-	fmt.Println("========>>>> remove container", containerID)
-	ctx = namespaces.WithNamespace(ctx, DefaultNamespace)
+// 	fmt.Println("========>>>> remove container", containerID)
+// 	ctx = namespaces.WithNamespace(ctx, DefaultNamespace)
 
-	// check connection status, if connection is bad, try to reconnect
-	if err := c.CheckConnection(ctx); err != nil {
-		log.Printf("Connection check failed: %v, attempting to reconnect...", err)
-		if reconnectErr := c.Reconnect(ctx); reconnectErr != nil {
-			return fmt.Errorf("failed to reconnect: %v", reconnectErr)
-		}
-	}
+// 	// check connection status, if connection is bad, try to reconnect
+// 	if err := c.CheckConnection(ctx); err != nil {
+// 		log.Printf("Connection check failed: %v, attempting to reconnect...", err)
+// 		if reconnectErr := c.Reconnect(ctx); reconnectErr != nil {
+// 			return fmt.Errorf("failed to reconnect: %v", reconnectErr)
+// 		}
+// 	}
 
-	global := NewGlobalOptionConfig()
-	opt := types.ContainerRemoveOptions{
-		Stdout:   io.Discard,
-		Force:    false,
-		Volumes:  false,
-		GOptions: *global,
-	}
-	err := container.Remove(ctx, c.containerdClient, []string{containerID}, opt)
-	if err != nil {
-		return fmt.Errorf("failed to remove container: %v", err)
-	}
-	return nil
-}
+// 	global := NewGlobalOptionConfig()
+// 	opt := types.ContainerRemoveOptions{
+// 		Stdout:   io.Discard,
+// 		Force:    false,
+// 		Volumes:  false,
+// 		GOptions: *global,
+// 	}
+// 	err := container.Remove(ctx, c.containerdClient, []string{containerID}, opt)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to remove container: %v", err)
+// 	}
+// 	return nil
+// }
 
 // Commit commit container to image
 func (c *CommitterImpl) Commit(ctx context.Context, devboxName string, contentID string, baseImage string, commitImage string) (string, error) {
@@ -623,30 +629,32 @@ func GetResolver(ctx context.Context, username string, secret string, targetRegi
 		// Check if this is the target registry
 		isTargetHost := strings.Contains(host, registryDomain) || strings.Contains(registryDomain, host)
 
+		// If this is not the target registry, use containerd's default behavior completely
+		if !isTargetHost {
+			// Don't apply any custom configuration for non-target registries
+			// Let containerd use its built-in default configuration
+			return config.ConfigureHosts(ctx, config.HostOptions{})(host)
+		}
+
+		// For target registry, apply custom configuration
 		// Create host-specific options
 		hostOptions := config.HostOptions{}
 
 		// Set credentials
-		if username != "" && secret != "" && targetRegistry != "" && isTargetHost {
+		if username != "" && secret != "" && targetRegistry != "" {
 			hostOptions.Credentials = func(h string) (string, string, error) {
 				log.Printf("Using provided credentials for registry: %s (target: %s)", h, registryDomain)
 				return username, secret, nil
 			}
-		} else {
-			// For other registries, let containerd use its default credential chain
-			hostOptions.Credentials = func(h string) (string, string, error) {
-				log.Printf("Using default credentials for registry: %s (not target: %s)", h, registryDomain)
-				return "", "", nil
-			}
 		}
 
-		// Set scheme: HTTP for insecure target registry, HTTPS for others
-		if isTargetHost && isTargetInsecure {
+		// Set scheme: HTTP for insecure target registry
+		if isTargetInsecure {
 			hostOptions.DefaultScheme = "http"
 			log.Printf("Using HTTP scheme for insecure target registry: %s", host)
 		} else {
-			// Let containerd use default HTTPS for secure registries
-			log.Printf("Using default (HTTPS) scheme for registry: %s", host)
+			hostOptions.DefaultScheme = "https"
+			log.Printf("Using HTTPS scheme for secure target registry: %s", host)
 		}
 
 		hostOptions.DefaultTLS = nil
